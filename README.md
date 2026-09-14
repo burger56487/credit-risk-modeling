@@ -10,8 +10,8 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Steps 1–5 complete** (data layer, database feature layer, leakage-safe splitting,
-cleaning decisions, business features and train-only binning).
+**Steps 1–6 complete** (data layer, database feature layer, leakage-safe splitting,
+cleaning decisions, business features, train-only binning and WOE/IV encoding).
 
 Roadmap:
 
@@ -22,8 +22,8 @@ Roadmap:
 | 3 | Train / validation / test splitting with leakage discipline | Done |
 | 4 | EDA and cleaning plan; median imputation dropped in favour of a missing bin | Done (decisions implemented in Step 5) |
 | 5 | Business features + train-only quantile binning | Done |
-| 6 | WOE / IV encoding on the training bins (zero cells, unknown bins, smoothing) | Planned |
-| 7 | Scorecard modelling, evaluation and monitoring metrics | Planned |
+| 6 | WOE / IV encoding on the training bins (zero cells, unknown bins, smoothing) | Done |
+| 7 | Logistic-regression scorecard baseline, evaluation and monitoring metrics | Planned |
 
 ## Dataset
 
@@ -54,6 +54,7 @@ credit-risk-modeling/
   src/data_layer/ingest_to_db.py   # Step 2: chunked CSV -> PostgreSQL ingestion
   src/data_layer/split_data.py     # Step 3: stratified and temporal splitting
   src/features/engineering.py      # Step 5: business features + train-only binning
+  src/features/woe.py              # Step 6: WOE/IV encoder + audit reports
   sql/01_create_tables.sql         # Step 2: raw table DDL
   sql/02_aggregate_bureau.sql      # Step 2: bureau -> one row per customer
   sql/03_build_model_table.sql     # Step 2: LEFT JOIN into the modelling table
@@ -62,6 +63,7 @@ credit-risk-modeling/
   tests/test_ingest_to_db.py       # ingestion tests (SQLite stand-in)
   tests/test_split_data.py         # split sizes, bad rates, no-leakage checks
   tests/test_engineering.py        # sentinel handling, ratios, binning discipline
+  tests/test_woe.py                # WOE/IV maths, alignment, unknown-bin policy
   data/data_dictionary.md          # field-level business meaning (Step 1 output)
   docker-compose.yml               # local PostgreSQL
   .github/workflows/ci.yml         # CI: pytest + PostgreSQL SQL validation
@@ -199,6 +201,52 @@ pd.testing.assert_index_equal(train_bins.index, split.y_train.index)
 - Ratios use only strictly positive income as the denominator; missing, zero or
   negative income produces a missing ratio instead of a distorted number.
 
+## Step 6: WOE encoding and IV screening
+
+```python
+from src.features.woe import (
+    WOEEncoder,
+    candidate_features_by_iv,
+    save_woe_reports,
+)
+
+encoder = WOEEncoder(alpha=0.5, min_bin_samples=20, unknown_policy="neutral")
+train_woe = encoder.fit_transform(train_bins, split.y_train)  # train labels only
+valid_woe = encoder.transform(valid_bins)                     # apply, never refit
+
+candidates = candidate_features_by_iv(encoder, iv_threshold=0.02)
+save_woe_reports(encoder, valid_bins, "reports/step_06", candidates)
+```
+
+**Conventions**
+
+- Direction: `WOE = ln(bad share / good share)`, where bad = target 1. Positive
+  WOE means the bin is more common among bad samples. WOE is not a default
+  probability.
+- Smoothing is symmetric and added to both classes, so the smoothed bad and good
+  shares each still sum to one:
+  `bad_share = (B_i + alpha) / (B + alpha*K)`, and the same for good.
+- IV is computed from the same smoothed distributions:
+  `IV = sum((bad_share - good_share) * WOE)`. As a rough guide only:
+  `<0.02` weak, `0.02–0.1` some information, `0.1–0.3` clearly informative,
+  `>=0.3` worth a careful review (very high values can indicate leakage, a
+  high-cardinality variable or sparse bins — high IV is not automatically good).
+- Bins unseen in training are encoded as `0` under the neutral policy (no
+  evidence either way, not "safe") and always listed in the unknown-bin report;
+  the strict policy raises instead. Bins that *did* appear in training, including
+  a missing bin, are encoded from their learned WOE.
+- Small bins and single-class bins are flagged but never removed automatically.
+
+**Discipline**
+
+- The encoder only accepts binned string columns; raw missing values and numeric
+  columns are rejected, so a later step cannot silently encode raw data.
+- The label must be index- and order-aligned with the features; misalignment
+  raises instead of producing a wrong mapping.
+- WOE/IV use the label, so inside cross-validation both the binner and the
+  encoder must be refitted on each training fold; the IV screen is a univariate
+  candidate filter, not the final variable selection.
+
 ## Current limitations (kept explicit)
 
 - The Home Credit split in this repository is a stratified random holdout, **not**
@@ -214,6 +262,8 @@ pd.testing.assert_index_equal(train_bins.index, split.y_train.index)
   very wide tables when copying, and refresh feature tables after new loads.
 - This is a research project on a public dataset; passing tests does not make the
   model fit for real lending decisions.
+- The Step 6 reports are audit artefacts, not deployment files: the bin edges,
+  encoder, feature order and model must be versioned together.
 
 ## Reproducibility
 
