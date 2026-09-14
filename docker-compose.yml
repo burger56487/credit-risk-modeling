@@ -2,13 +2,18 @@ services:
   postgres:
     image: postgres:16
     environment:
-      POSTGRES_USER: creditrisk
-      POSTGRES_PASSWORD: creditrisk
-      POSTGRES_DB: creditrisk
+      # 从环境或 .env 读取，缺失即失败：仓库里不放任何可复用的口令。
+      POSTGRES_USER: ${POSTGRES_USER:?请通过环境变量或 .env 提供 POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?请通过环境变量或 .env 提供 POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?请通过环境变量或 .env 提供 POSTGRES_DB}
     ports:
-      - "5432:5432"
+      # 显式绑定回环地址。默认写法 "5432:5432" 会监听宿主机所有网络接口，
+      # 那不等于“仅本地可访问”。
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    # 注意：修改这里的 POSTGRES_PASSWORD 不会修改已有数据卷里账户的口令。
+    # 需要更换口令时，请显式 ALTER ROLE 并更新连接配置，不要删除数据卷。
 
 volumes:
   pgdata:

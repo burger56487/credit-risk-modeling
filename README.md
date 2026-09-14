@@ -179,17 +179,39 @@ pass the suite here.
 
 ```bash
 # 1. start a local PostgreSQL
+#    credentials come from the environment; there is no default password in the
+#    repository, and the port is bound to the loopback address on purpose
+cp .env.example .env      # then fill in local values
 docker compose up -d
 
-# 2. create the raw tables, then ingest the CSVs (chunked, idempotent)
-export CREDITRISK_DB_URL="postgresql+psycopg2://creditrisk:creditrisk@localhost:5432/creditrisk"
+# 2. initialise the persistent structure once (it never rebuilds content)
 psql "$CREDITRISK_DB_URL" -f sql/01_create_tables.sql
-python -m src.data_layer.ingest_to_db
 
-# 3. aggregate the 1:N bureau table and build the modelling table
-psql "$CREDITRISK_DB_URL" -f sql/02_aggregate_bureau.sql
-psql "$CREDITRISK_DB_URL" -f sql/03_build_model_table.sql
+# 3. only for a database created by the earlier version: migrate it explicitly
+psql "$CREDITRISK_DB_URL" -v ON_ERROR_STOP=1 -f sql/05_migrate_step2_contract.sql
+
+# 4. load, aggregate and build the wide table
+python -m src.data_layer.ingest_to_db
 ```
+
+**Scope of this pipeline (frozen field contract).** The database input is an
+explicit **projection**, not the whole download: `application_train.csv` (12
+columns) and `bureau.csv` (7 columns). The dataset inventory in
+`src/data_layer/load_raw.py` still lists all seven files for completeness checks,
+while `required_files()` is derived from the load contract — the pipeline no
+longer demands seven files and then quietly uses two.
+
+Extra source columns are allowed but are never silently dropped: the resolved
+header, the loaded columns and the list of "not loaded in this version" columns
+are part of the load record. Two source columns that only differ by case or
+padding are rejected, because the reader would otherwise fold them into one.
+
+The **contract decides the columns**; the database structure only accepts and
+verifies them. `check_schema()` runs before every load and refuses to continue
+when a table is missing, has an unexpected type, or has the wrong primary key —
+an older database must be migrated deliberately with
+`sql/05_migrate_step2_contract.sql`, which raises instead of deleting rows when
+existing data violates a constraint.
 
 **Why a database layer instead of one big `pandas` join?** The 1:N tables have
 millions of rows, so the aggregation is pushed into SQL where it is versioned,
@@ -202,10 +224,16 @@ modelling layer.
 - Count features default to `0` (`COALESCE`), while amount features stay `NULL`,
   because "zero credit" and "unknown credit" are different states; Step 4 decides
   the missing-value policy.
-- `MAX(days_credit)` is the most recent bureau record because the day counts are
-  negative.
-- Ingestion only writes the columns defined in the DDL, lower-cases CSV headers,
-  and clears the table first so the load is idempotent.
+- `MAX(days_credit)` is the most recent historical credit start because the day
+  counts are negative; it is **not** a bureau query timestamp.
+- `bureau_active_cnt` counts visible records whose status is "Active" and does not
+  claim that each one carries a balance; `bureau_overdue_cnt` counts records whose
+  overdue days exceed zero, and a NULL overdue value is not an observed event.
+- Sums ignore NULLs, so `SUM(amt_credit_sum_debt)` is the sum of *known* debts.
+  The load record carries the missing counts per key field so that a zero count is
+  never read as complete evidence of no risk.
+- Connection configuration has no default: a missing `CREDITRISK_DB_URL` stops the
+  run instead of pointing at some other database.
 
 ## Step 3: splitting and leakage discipline
 
