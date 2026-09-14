@@ -27,3 +27,33 @@ jobs:
 
       - name: Run tests
         run: python -m pytest -q
+
+  sql:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: creditrisk
+          POSTGRES_PASSWORD: creditrisk
+          POSTGRES_DB: creditrisk
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate the SQL scripts against PostgreSQL
+        env:
+          PGPASSWORD: creditrisk
+        run: |
+          for f in sql/01_create_tables.sql sql/02_aggregate_bureau.sql sql/03_build_model_table.sql; do
+            echo "applying $f"
+            psql -h localhost -U creditrisk -d creditrisk -v ON_ERROR_STOP=1 -f "$f"
+          done

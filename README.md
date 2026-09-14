@@ -10,14 +10,14 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Step 1 (data acquisition and business understanding) — complete.**
+**Steps 1–2 (data acquisition and database feature layer) — complete.**
 
 Roadmap:
 
 | Step | Content | Status |
 |------|---------|--------|
 | 1 | Data acquisition, table structure, data dictionary, raw loading checks | Done |
-| 2 | Data cleaning: missing values, the `DAYS_EMPLOYED` sentinel, outliers | Planned |
+| 2 | PostgreSQL ingestion and SQL aggregation of the 1:N bureau table | Done |
 | 3 | Feature engineering on the 1:N tables (bureau, previous applications, installments) | Planned |
 | 4 | Feature selection and business-driven feature review | Planned |
 | 5 | Model training with out-of-sample validation (logistic regression baseline, GBDT) | Planned |
@@ -49,10 +49,17 @@ The main table has one row per loan application (about 300k rows) with the targe
 
 ```
 credit-risk-modeling/
-  src/data_layer/load_raw.py    # Step 1: raw loading and integrity checks
-  tests/test_load_raw.py        # unit tests for the loading layer
-  data/data_dictionary.md       # field-level business meaning (Step 1 output)
-  .github/workflows/ci.yml      # CI: run tests on every push
+  src/data_layer/load_raw.py       # Step 1: raw loading and integrity checks
+  src/data_layer/ingest_to_db.py   # Step 2: chunked CSV -> PostgreSQL ingestion
+  sql/01_create_tables.sql         # Step 2: raw table DDL
+  sql/02_aggregate_bureau.sql      # Step 2: bureau -> one row per customer
+  sql/03_build_model_table.sql     # Step 2: LEFT JOIN into the modelling table
+  tests/test_load_raw.py           # loading-layer tests
+  tests/test_aggregation.py        # SQL aggregation and LEFT JOIN semantics
+  tests/test_ingest_to_db.py       # ingestion tests (SQLite stand-in)
+  data/data_dictionary.md          # field-level business meaning (Step 1 output)
+  docker-compose.yml               # local PostgreSQL
+  .github/workflows/ci.yml         # CI: pytest + PostgreSQL SQL validation
 ```
 
 ## How to run
@@ -66,6 +73,38 @@ python -m src.data_layer.load_raw
 # run the tests
 pytest -q
 ```
+
+## Step 2: PostgreSQL feature layer
+
+```bash
+# 1. start a local PostgreSQL
+docker compose up -d
+
+# 2. create the raw tables, then ingest the CSVs (chunked, idempotent)
+export CREDITRISK_DB_URL="postgresql+psycopg2://creditrisk:creditrisk@localhost:5432/creditrisk"
+psql "$CREDITRISK_DB_URL" -f sql/01_create_tables.sql
+python -m src.data_layer.ingest_to_db
+
+# 3. aggregate the 1:N bureau table and build the modelling table
+psql "$CREDITRISK_DB_URL" -f sql/02_aggregate_bureau.sql
+psql "$CREDITRISK_DB_URL" -f sql/03_build_model_table.sql
+```
+
+**Why a database layer instead of one big `pandas` join?** The 1:N tables have
+millions of rows, so the aggregation is pushed into SQL where it is versioned,
+reviewable and closer to a production pipeline; `pandas` is reserved for the
+modelling layer.
+
+**Design decisions**
+
+- `LEFT JOIN` keeps every application, including customers with no bureau record.
+- Count features default to `0` (`COALESCE`), while amount features stay `NULL`,
+  because "zero credit" and "unknown credit" are different states; Step 4 decides
+  the missing-value policy.
+- `MAX(days_credit)` is the most recent bureau record because the day counts are
+  negative.
+- Ingestion only writes the columns defined in the DDL, lower-cases CSV headers,
+  and clears the table first so the load is idempotent.
 
 ## Business notes already captured in Step 1
 
