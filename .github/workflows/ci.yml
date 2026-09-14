@@ -29,7 +29,14 @@ jobs:
         run: git ls-files --error-unmatch uv.lock
 
       - name: 按锁文件安装依赖
-        run: uv sync --frozen --all-extras
+        run: |
+          # 依赖下载偶发被 CDN 拒绝，重试几次再判定失败
+          for attempt in 1 2 3; do
+            if uv sync --frozen --all-extras; then exit 0; fi
+            echo "第 $attempt 次安装失败，稍后重试"
+            sleep 5
+          done
+          exit 1
 
       - name: 检查语法
         run: uv run --frozen python -m compileall -q src apps
@@ -93,7 +100,14 @@ jobs:
         uses: astral-sh/setup-uv@v5
 
       - name: 按锁文件安装依赖
-        run: uv sync --frozen --all-extras
+        run: |
+          # 这个作业只需要实库测试用到的依赖，不装看板额外依赖
+          for attempt in 1 2 3; do
+            if uv sync --frozen --extra postgres; then exit 0; fi
+            echo "第 $attempt 次安装失败，稍后重试"
+            sleep 5
+          done
+          exit 1
 
       - name: 用 psql 初始化真实表结构
         env:
