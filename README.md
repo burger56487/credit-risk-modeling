@@ -10,9 +10,9 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Steps 1–7 complete** (data layer, database feature layer, leakage-safe splitting,
-cleaning decisions, business features, train-only binning and WOE/IV encoding, and
-the end-to-end logistic-regression baseline).
+**Steps 1–8 complete** (data layer, database feature layer, leakage-safe splitting,
+cleaning decisions, business features, train-only binning and WOE/IV encoding, the
+end-to-end logistic-regression baseline, and the gradient-boosting comparison).
 
 Roadmap:
 
@@ -25,7 +25,8 @@ Roadmap:
 | 5 | Business features + train-only quantile binning | Done |
 | 6 | WOE / IV encoding on the training bins (zero cells, unknown bins, smoothing) | Done |
 | 7 | Logistic-regression scorecard baseline, evaluation and monitoring metrics | Done |
-| 8 | Gradient-boosting comparison on the same split, scored fairly against the scorecard | Planned |
+| 8 | Gradient-boosting comparison on the same split, scored fairly against the scorecard | Done |
+| 9 | Scorecard scaling: probability to points, and per-variable score decomposition | Planned |
 
 ## Dataset
 
@@ -58,6 +59,7 @@ credit-risk-modeling/
   src/features/engineering.py      # Step 5: business features + train-only binning
   src/features/woe.py              # Step 6: WOE/IV encoder + audit reports
   src/models/logistic.py           # Step 7: end-to-end logistic baseline + metrics
+  src/models/boosting.py           # Step 8: gradient-boosting comparison pipeline
   sql/01_create_tables.sql         # Step 2: raw table DDL
   sql/02_aggregate_bureau.sql      # Step 2: bureau -> one row per customer
   sql/03_build_model_table.sql     # Step 2: LEFT JOIN into the modelling table
@@ -68,6 +70,9 @@ credit-risk-modeling/
   tests/test_engineering.py        # sentinel handling, ratios, binning discipline
   tests/test_woe.py                # WOE/IV maths, alignment, unknown-bin policy
   tests/test_logistic.py           # baseline chain, fitted-state discipline, metrics
+  tests/test_boosting.py           # tree pipeline, duplicate/missing handling
+  tests/test_comparison_runner.py  # Step 8 runner guards and written reports
+  scripts/run_step_08_comparison.py  # one shared split: logistic vs boosting
   data/data_dictionary.md          # field-level business meaning (Step 1 output)
   docker-compose.yml               # local PostgreSQL
   .github/workflows/ci.yml         # CI: pytest + PostgreSQL SQL validation
@@ -337,6 +342,78 @@ Note the direction of `C`: it is the **inverse** penalty strength, so a smaller
 The validation numbers themselves are produced by running the script on the real
 split and are not asserted anywhere in the code or the tests.
 
+## Step 8: gradient-boosting comparison
+
+```bash
+# needs the modelling table from the Step 2 SQL layer
+python scripts/run_step_08_comparison.py \
+  --model-table data/processed/model_table.csv \
+  --out-dir reports/step_08
+```
+
+The runner cuts **one** stratified split, fits both pipelines on that same train
+split, scores both on that same validation split, and leaves the test split
+sealed. It writes the three-way validation comparison, the in-sample training
+diagnostics, both feature reports and an `experiment_metadata.json` that records
+the parameters, the environment versions and the SHA-256 of the input file.
+
+The two pipelines are deliberately different:
+
+| | Step 7 scorecard | Step 8 tree |
+|---|---|---|
+| Features | business features → bins → WOE → IV screen | business features → constants and exact duplicates dropped |
+| Label use | WOE and IV are fitted on training labels | only the tree fit uses labels |
+| Missing values | own bin, then a WOE value | kept as missing, handled natively |
+| Class weight | none | none |
+| Early stopping | n/a | none: the validation set is not passed to `fit` |
+
+**Configuration choices**
+
+| Parameter | Value | Role |
+|-----------|-------|------|
+| Rounds | 300 | fixed training budget |
+| Learning rate | 0.05 | small step per round |
+| `num_leaves` | 15 | limits single-tree complexity |
+| `min_child_samples` | 100 | discourages very fine splits |
+| `reg_lambda` | 1.0 | limits leaf output size |
+| Threads | 1 | keeps test and reproduction stable |
+
+`min_child_samples` is approximate in this framework; it is not a hard per-leaf
+database constraint. A fixed seed and `deterministic=True` improve
+reproducibility but do not guarantee bit-identical results across operating
+systems, library versions and compilers.
+
+**Two details worth naming**
+
+- The retained feature count differs between the two models. That is the
+  designed consequence of comparing two whole procedures, not a missing step:
+  the tree branch does not inherit the IV screen, and a variable with weak
+  univariate IV can still matter through interactions.
+- The recorded rounds are the *configured* budget and the *actual* completed
+  rounds. The framework can finish early without any early stopping, so the
+  configured 300 must not be reported as "300 effective trees".
+
+**Reading the comparison** (the numbers are descriptive, not a verdict)
+
+1. Tree better on both ranking and probability loss: the non-linear pipeline
+   added value on this validation split. It still does not follow that it will
+   win in future, that the gap is statistically significant, or that it is
+   deployable.
+2. Tree better at ranking but worse on log loss: the ordering improved while the
+   probabilities became over-confident; check overfitting and calibration before
+   declaring a win.
+3. Tree much better in-sample, barely better out-of-sample: the model mostly
+   learned noise. Fewer leaves, larger leaf size, stronger regularisation or
+   early stopping belong to a *later* experiment, not to a quiet edit after
+   seeing the result.
+4. The scorecard is already close: that is a useful finding, not a failure. It
+   supports choosing the easier-to-review pipeline, subject to the business
+   constraints.
+
+Split gain and logistic coefficients are not comparable quantities. Split gain
+is a training-time statistic, not a causal contribution and not the benefit
+measured on validation data, so it is exported for inspection only.
+
 ## Current limitations (kept explicit)
 
 - The Home Credit split in this repository is a stratified random holdout, **not**
@@ -361,6 +438,15 @@ split and are not asserted anywhere in the code or the tests.
 - The Step 7 evaluation metrics are computed on a stratified random holdout, so
   they describe this sample, not the model's behaviour on a future applicant
   population.
+- The Step 8 comparison has no early stopping, no parameter search and no
+  probability calibration, and no paired significance test: it is a first
+  side-by-side reading of two pipelines, not evidence that one model is better.
+- LightGBM can accept missing values natively, but that does not mean an unseen
+  missing pattern is scored reliably; missingness distribution still needs
+  monitoring.
+- The Step 8 runner records parameters, environment versions and an input file
+  digest, which is not yet a full reproduction receipt: the sample split list,
+  the code version and a dependency lock file are still missing.
 
 ## Reproducibility
 
