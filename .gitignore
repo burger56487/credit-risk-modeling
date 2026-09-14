@@ -7,6 +7,9 @@ data/processed/*
 # Generated reports (aggregated metrics only; never per-applicant predictions)
 reports/
 
+# Local run records and artefacts
+artifacts/
+
 # Python
 __pycache__/
 *.py[cod]

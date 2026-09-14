@@ -10,13 +10,13 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Steps 1–13 complete** (data layer, database feature layer, leakage-safe splitting,
+**Steps 1–14 complete** (data layer, database feature layer, leakage-safe splitting,
 cleaning decisions, business features, train-only binning and WOE/IV encoding, the
 end-to-end logistic-regression baseline, the gradient-boosting comparison, the
 scorecard scaling with per-variable decomposition, the paired resampling comparison
 of the two pipelines, the calibration and distribution-stability diagnostics, the
-internal explanation and reason-code prototype, and the offline approval-threshold
-policy simulation).
+internal explanation and reason-code prototype, the offline approval-threshold
+policy simulation, and the batch monitoring loop with append-only run records).
 
 Roadmap:
 
@@ -35,7 +35,8 @@ Roadmap:
 | 11 | Probability calibration diagnostics and input-distribution stability | Done |
 | 12 | Model explanation and reason-code prototype | Done |
 | 13 | Approval threshold and business-policy offline simulation | Done |
-| 14 | Monitoring dashboard, alert rules and run records | Planned |
+| 14 | Monitoring dashboard, alert rules and run records | Done |
+| 15 | Model artefact packaging, version consistency and a prediction service | Planned |
 
 ## Dataset
 
@@ -76,6 +77,7 @@ credit-risk-modeling/
   src/evaluation/calibration_stability.py  # Step 11: calibration + drift checks
   src/explain/local.py             # Step 12: local attribution + reason codes
   src/strategy/approval.py         # Step 13: threshold policy + scenario utility
+  src/monitoring/runner.py         # Step 14: batch monitor + run records
   sql/01_create_tables.sql         # Step 2: raw table DDL
   sql/02_aggregate_bureau.sql      # Step 2: bureau -> one row per customer
   sql/03_build_model_table.sql     # Step 2: LEFT JOIN into the modelling table
@@ -98,6 +100,8 @@ credit-risk-modeling/
   tests/test_explanation_runner.py     # Step 12 runner end to end
   tests/test_approval.py               # rules, utility maths and selection
   tests/test_policy_runner.py          # Step 13 runner end to end
+  tests/test_monitoring.py             # batch guards, notices, append-only store
+  tests/test_monitoring_runner.py      # Step 14 runner and dashboard parse check
   tests/conftest.py                # synthetic modelling table shared by runners
   scripts/run_step_08_comparison.py  # one shared split: logistic vs boosting
   scripts/run_step_09_scorecard.py   # score scale, decomposition and audit
@@ -105,6 +109,8 @@ credit-risk-modeling/
   scripts/run_step_11_diagnostics.py     # calibration + stability reports
   scripts/run_step_12_explanations.py    # aggregate explanation audit only
   scripts/run_step_13_policy_simulation.py  # threshold curves and cost sensitivity
+  scripts/run_step_14_monitoring.py         # batch runs into the record store
+  apps/monitoring_dashboard.py              # read-only local Streamlit view
   data/data_dictionary.md          # field-level business meaning (Step 1 output)
   docker-compose.yml               # local PostgreSQL
   .github/workflows/ci.yml         # CI: pytest + PostgreSQL SQL validation
@@ -839,6 +845,86 @@ utility by exactly `approved_events × ΔL`: logistic 38,010 → 29,010, boostin
 36,055 → 19,555. The larger the approved event count, the more sensitive the
 policy is to the loss assumption.
 
+## Step 14: batch monitoring and run records
+
+```bash
+# one unlabeled run and one labeled run into the local record store
+python scripts/run_step_14_monitoring.py \
+  --model-table data/processed/model_table.csv \
+  --threshold 0.08 --database artifacts/monitoring/runs.sqlite3
+
+# optional read-only view (needs an extra local dependency)
+python -m pip install streamlit
+python -m streamlit run apps/monitoring_dashboard.py
+```
+
+The monitor is constructed once with a **fixed** model snapshot, a **fixed**
+reference distribution (the training split) and an optional **frozen** rule. It
+re-trains nothing, re-selects no threshold, executes no credit decision, and its
+notices mean "someone should look", not "the model has failed".
+
+What each input state allows:
+
+| Available input | Computed | Not computed |
+|---|---|---|
+| Batch without labels | feature/prediction drift, unknown bins, invalid values, simulated approval rate, sampled explanation check | observed risk rate, calibration error, labelled utility |
+| Complete public research labels | the above, plus calibration, ranking metrics and labelled utility | any claim about real matured loan performance |
+
+Partial labels are rejected for the whole batch: the report never fills them with
+zeros and never quietly reduces to the labelled subset. Real label maturity is
+not implemented, so `label_scope="真实业务已成熟"` is refused outright.
+
+**Default screening rules** (demo settings, not industry thresholds):
+
+| Check | Default handling |
+|---|---|
+| Missing raw fields, index errors, duplicate application ids | the run fails |
+| Invalid values found | review notice; applications are not deleted |
+| Special code found (e.g. employment placeholder) | separate review notice; never read as "unemployed" |
+| Highest unknown-bin rate over retained variables above 1% | review notice |
+| Batch below the minimum size | "undetermined" notice, not "normal" |
+| Reference and current both large enough, drift index above 0.2 | review notice |
+| Label counts sufficient, overall predicted-vs-actual gap above 3 points | review notice |
+| Sampled explanation cannot reconstruct the model output | the run fails |
+| No threshold configured | strategy module skipped, no improvised rule |
+
+The explanation check samples a fixed number of applications with a fixed seed
+and never uses labels, so `是否覆盖整批` is reported honestly: a sampled audit is
+not a per-application verification of the whole batch. The unknown-bin rate is
+per retained variable, not the share of applications with any unknown value, and
+it is `null` for the tree pipeline because that pipeline has no scorecard bins.
+
+**Run records are append-only.** Each run is written in one transaction with the
+run id as the primary key, so re-using an id raises `sqlite3.IntegrityError`
+instead of overwriting an earlier result — the point at which an audit trail
+would otherwise be lost. A failed computation still stores a bounded failure
+record (status, versions, timestamp, no raw data) and then re-raises; `NaN`
+becomes `null` while an infinity is refused rather than disguised as missing.
+The record timestamp is the diagnostic time, not an application date, which is
+why no "monthly stability trend" is drawn.
+
+**Demo run** on the synthetic table (1200-in, the Step 13 threshold 0.08 for the
+logistic pipeline, ~4 seconds for two runs):
+
+| Record | Status | Sample | Invalid | Special code | Unknown-bin rate | Approval rate | Supervised diagnostics |
+|---|---|---|---|---|---|---|---|
+| 无标签诊断 | 完成 | 1200 | 0 | 2 | 0.000 | 36.50% (438) | absent (null) |
+| 公开标签诊断 | 完成 | 1200 | 0 | 2 | 0.000 | 36.50% (438) | AUC 0.9270, KS 0.6992, AP 0.8769; bias +0.0184 |
+
+The notices are `特殊编码` (2 applications) in the unlabeled run and the same plus
+supervised metrics in the labeled run. The labelled strategy result reproduces
+Step 13 exactly (438 approvals, utility 35,010), which is the intended
+cross-check: monitoring re-evaluates a frozen rule, it does not search for one.
+
+**Dashboard caveats.** `apps/monitoring_dashboard.py` is a read-only local view:
+it opens the record store through the tested `load_runs` helper, so rendering a
+page can never create or modify a record. Streamlit is deliberately **not** in
+`requirements.txt` (it would bloat the test environment for an optional view), so
+the file is syntax-checked in CI and its data path is unit-tested, but the
+rendered page has not been visually verified here. There is no authentication,
+authorisation or network hardening: do not expose it publicly and do not point it
+at real customer records.
+
 ## Current limitations (kept explicit)
 
 - The Home Credit split in this repository is a stratified random holdout, **not**
@@ -923,6 +1009,17 @@ policy is to the loss assumption.
 - The sample constraints (approval rate, approved event rate, minimum count,
   positive utility) are development settings, not bank policy, and they are not a
   guarantee about a future approved population.
+- The Step 14 monitor is batch-based, not real-time: there is no scheduler,
+  alerting, multi-user authorisation or disaster recovery, and the dashboard is a
+  local, unauthenticated view.
+- Version labels in run records are human-entered strings, not digests bound to
+  model, data or configuration artefacts, so this is not tamper-evident model
+  lineage yet.
+- The local run-record store is a research log. It does not replace the raw data
+  layer and does not fix the Step 2 ingestion TODOs.
+- Supervised monitoring still uses the development validation split that has been
+  inspected repeatedly, and the project has no fairness assessment, business
+  policy sign-off or compliance approval.
 
 ## Reproducibility
 
