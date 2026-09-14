@@ -42,6 +42,7 @@ testpaths = ["tests"]
 addopts = "-ra --strict-markers"
 markers = [
     "integration: 跨模块集成测试，不依赖真实客户数据",
+    "postgres: 需要真实 PostgreSQL 的实库测试（未配置连接串时跳过）",
 ]
 
 [tool.coverage.run]

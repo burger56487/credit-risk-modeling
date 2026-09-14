@@ -514,7 +514,10 @@ def _copy_file_to_staging(
     )
 
     for frame in reader:
-        frame.columns = normalize_headers(frame.columns)
+        try:
+            frame.columns = normalize_headers(frame.columns)
+        except ValueError as exc:
+            raise LoadStageError("暂存装载", str(exc)) from exc
 
         if header_info is None:
             try:

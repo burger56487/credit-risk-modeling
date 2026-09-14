@@ -47,7 +47,7 @@ Roadmap:
 | Batch monitoring and local dashboard | Research prototype; it never takes a business action and the dashboard page was not visually verified |
 | Artefact and scoring API | Verified loading and online/offline consistency; not a production security certification |
 | Continuous integration | Added in Step 16; whether it passes is decided by the actual workflow run |
-| Raw database full chain | **Not accepted** — the Step 2 ingestion TODOs are still open |
+| Raw database full chain | **Accepted by target-database integration tests** on a fixed artificial sample: staged atomic load, rollback matrix, concurrency and read snapshot. Loading the real Kaggle files has not been run yet. |
 | Final holdout evaluation | **Not performed** |
 | Real business use and benefit | **Not started** and must not be claimed |
 
@@ -248,6 +248,40 @@ The pipeline is PostgreSQL-only on purpose: `COPY`, advisory locks and temporary
 tables are what make the atomic behaviour possible. In-memory databases are used
 elsewhere only for fast semantic tests and are not evidence of transactional
 correctness.
+
+### Target-database acceptance (Step 2c)
+
+```bash
+# a throwaway database whose name contains "test"; the tests rebuild the tables
+export CREDITRISK_TEST_DB_URL="postgresql+psycopg2://<user>:<password>@127.0.0.1:5432/<test_db>"
+uv run --frozen python -m pytest -m postgres -q
+```
+
+The fixed sample is three labelled applications and four bureau records, one of
+which belongs to an application outside the labelled set. The acceptance results
+below come from a real PostgreSQL 16 instance (locally, and again in CI):
+
+| Check | Observed |
+|---|---|
+| `bureau` after load | 4 rows, including the record for application 999 |
+| `feat_bureau` keys | `1, 3, 999` (three applications) |
+| `model_input` | 3 rows, keys `1, 2, 3` |
+| Application 1 | `bureau_cnt = 2`, credit total `300`, known debt `40`, overdue records `1` |
+| Application 2 (no bureau record) | `bureau_cnt = 0`, amounts `NULL` |
+| Application 3 (all amounts unknown) | `bureau_cnt = 1`, amounts stay `NULL` |
+| Application 999 | kept in `bureau`, never joined into `model_input`, no failure |
+| Load record | counts, linkage and per-field missing counts, written in the same transaction |
+
+Failure injections (each one verified to leave the four tables, the key sets and
+the success records untouched, and to leave the next valid load working):
+missing input file; missing required column; header that collides after
+normalisation; an invalid value in a later chunk; a duplicate key across chunks; a
+bureau failure after the main table was already staged; a failure injected after
+the source tables were replaced; a failure injected in reconciliation.
+Concurrency is covered by holding the write lock in one session and requiring the
+second loader to time out without mixing versions; the read snapshot is covered by
+pausing a writer after publication and checking that another connection still sees
+the previous committed row until the writer commits.
 
 **Scope of this pipeline (frozen field contract).** The database input is an
 explicit **projection**, not the whole download: `application_train.csv` (12
@@ -1182,15 +1216,25 @@ found it.
 The automated workflow adds linting and the coverage gate but deliberately does
 **not** download the real data, read the final test split, pick models or thresholds,
 publish artefacts, upload models/tokens/per-row predictions, or retrain on merge. It
-also keeps the PostgreSQL script-validation job alongside the new acceptance job.
+now runs **two jobs whose numbers are reported separately**:
+
+| Job | What it runs | Latest observed |
+|---|---|---|
+| acceptance (no database) | syntax, ruff, full suite, coverage gate | 294 passed, 17 skipped, coverage 80.11% |
+| postgres-pipeline (PostgreSQL 16 service) | the real loader and SQL scripts, including rollback, concurrency and snapshot tests, plus the whole suite | 311 passed, coverage 86.86% |
+
+The postgres job also fails if the loader starts without a configured connection
+string, and the `postgres`-marked tests are skipped — not silently passed — when no
+test database is available.
 
 **Two blockers remain, and they are recorded rather than papered over**
 
-1. The Step 2 raw database chain still needs: DDL matching the import columns, a
-   transactional load instead of per-chunk commits after truncation, table names
-   from a fixed allow-list, a safe strategy for very wide tables, real feature-table
-   refreshes rather than "skip if present", and reconciliation of row counts, keys
-   and duplicate joins against the target database engine.
+1. The Step 2 raw database chain is now accepted on a fixed artificial sample
+   (atomic staged load, rollback matrix, concurrency, read snapshot, reconciliation
+   and load audit). Still outstanding: running it on the real Kaggle files, and the
+   dataset-scale questions that only that run can answer — source-side duplicate
+   keys, very wide application files, load duration and disk growth from the
+   delete-and-insert refresh.
 2. The final holdout split has not been evaluated under a frozen protocol. Before it
    is opened, the data contract, partition membership, preprocessing, model,
    probability definition, scale, policy and evaluation method all have to be frozen

@@ -9,7 +9,7 @@ permissions:
 
 jobs:
   acceptance:
-    name: 语法、静态检查、测试与覆盖率
+    name: 语法、静态检查、测试与覆盖率（不连数据库）
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
@@ -56,17 +56,19 @@ jobs:
             reports/test-results.xml
           if-no-files-found: warn
 
-  sql:
-    name: PostgreSQL 脚本校验
+  postgres-pipeline:
+    name: PostgreSQL 实库装载验收（装载、回滚、并发、快照）
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     services:
       postgres:
         image: postgres:16
         env:
           POSTGRES_USER: creditrisk
-          POSTGRES_PASSWORD: creditrisk
-          POSTGRES_DB: creditrisk
+          # 短生命周期测试库专用凭据，不复用任何真实环境口令
+          POSTGRES_PASSWORD: ci_test_password
+          POSTGRES_DB: creditrisk_test
         ports:
           - 5432:5432
         options: >-
@@ -79,11 +81,51 @@ jobs:
       - name: 获取代码
         uses: actions/checkout@v4
 
-      - name: 在 PostgreSQL 上验证建表与聚合脚本
+      - name: 检查锁文件已提交
+        run: git ls-files --error-unmatch uv.lock
+
+      - name: 配置解释器
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: 配置环境工具
+        uses: astral-sh/setup-uv@v5
+
+      - name: 按锁文件安装依赖
+        run: uv sync --frozen --all-extras
+
+      - name: 用 psql 初始化真实表结构
         env:
-          PGPASSWORD: creditrisk
+          PGPASSWORD: ci_test_password
+        run: >
+          psql -h localhost -U creditrisk -d creditrisk_test
+          -v ON_ERROR_STOP=1 -f sql/01_create_tables.sql
+
+      - name: 连接配置缺失时必须失败
         run: |
-          for f in sql/01_create_tables.sql sql/02_aggregate_bureau.sql sql/03_build_model_table.sql; do
-            echo "applying $f"
-            psql -h localhost -U creditrisk -d creditrisk -v ON_ERROR_STOP=1 -f "$f"
-          done
+          if uv run --frozen python -c "from src.data_layer.ingest_to_db import get_engine; get_engine()"; then
+            echo "缺少 CREDITRISK_DB_URL 时不应成功"
+            exit 1
+          fi
+
+      - name: 运行实库装载验收与全部测试
+        env:
+          CREDITRISK_TEST_DB_URL: postgresql+psycopg2://creditrisk:ci_test_password@127.0.0.1:5432/creditrisk_test
+        run: >
+          uv run --frozen python -m pytest
+          --cov=src
+          --cov-branch
+          --cov-report=term-missing
+          --cov-report=xml:reports/coverage-postgres.xml
+          --junitxml=reports/test-results-postgres.xml
+
+      - name: 保存实库验收报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 实库验收报告
+          path: |
+            reports/coverage-postgres.xml
+            reports/test-results-postgres.xml
+          if-no-files-found: warn
