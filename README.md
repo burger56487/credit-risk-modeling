@@ -10,11 +10,12 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Steps 1–11 complete** (data layer, database feature layer, leakage-safe splitting,
+**Steps 1–12 complete** (data layer, database feature layer, leakage-safe splitting,
 cleaning decisions, business features, train-only binning and WOE/IV encoding, the
 end-to-end logistic-regression baseline, the gradient-boosting comparison, the
 scorecard scaling with per-variable decomposition, the paired resampling comparison
-of the two pipelines, and the calibration and distribution-stability diagnostics).
+of the two pipelines, the calibration and distribution-stability diagnostics, and the
+internal explanation and reason-code prototype).
 
 Roadmap:
 
@@ -31,7 +32,8 @@ Roadmap:
 | 9 | Scorecard scaling: probability to points, and per-variable score decomposition | Done |
 | 10 | Discrimination validation with paired resampling confidence intervals | Done |
 | 11 | Probability calibration diagnostics and input-distribution stability | Done |
-| 12 | Model explanation and reason-code prototype | Planned |
+| 12 | Model explanation and reason-code prototype | Done |
+| 13 | Approval threshold and business-policy offline simulation | Planned |
 
 ## Dataset
 
@@ -70,6 +72,7 @@ credit-risk-modeling/
   src/models/configs.py            # frozen model configurations shared by runners
   src/evaluation/discrimination.py # Step 10: ranking metrics + paired bootstrap
   src/evaluation/calibration_stability.py  # Step 11: calibration + drift checks
+  src/explain/local.py             # Step 12: local attribution + reason codes
   sql/01_create_tables.sql         # Step 2: raw table DDL
   sql/02_aggregate_bureau.sql      # Step 2: bureau -> one row per customer
   sql/03_build_model_table.sql     # Step 2: LEFT JOIN into the modelling table
@@ -88,11 +91,14 @@ credit-risk-modeling/
   tests/test_discrimination_runner.py  # Step 10 runner end to end
   tests/test_calibration_stability.py  # calibration maths, PSI, edge cases
   tests/test_diagnostics_runner.py     # Step 11 runner end to end
+  tests/test_local_explanation.py      # identity, grouping and code boundaries
+  tests/test_explanation_runner.py     # Step 12 runner end to end
   tests/conftest.py                # synthetic modelling table shared by runners
   scripts/run_step_08_comparison.py  # one shared split: logistic vs boosting
   scripts/run_step_09_scorecard.py   # score scale, decomposition and audit
   scripts/run_step_10_discrimination.py  # paired bootstrap on the same split
   scripts/run_step_11_diagnostics.py     # calibration + stability reports
+  scripts/run_step_12_explanations.py    # aggregate explanation audit only
   data/data_dictionary.md          # field-level business meaning (Step 1 output)
   docker-compose.yml               # local PostgreSQL
   .github/workflows/ci.yml         # CI: pytest + PostgreSQL SQL validation
@@ -686,6 +692,84 @@ leaves the metrics unchanged but keeps the accumulation finite; a weight that
 would underflow to zero during normalisation is rejected instead of being
 silently dropped.
 
+## Step 12: internal explanations and reason codes
+
+```bash
+python scripts/run_step_12_explanations.py \
+  --model-table data/processed/model_table.csv \
+  --out-dir reports/step_12 --explain-rows 200 --top-k 3
+```
+
+The runner explains a fixed random sample of validation applications (drawn
+without labels, not cherry-picked), and writes **aggregate** reports only. Per
+application contributions and reason codes stay in memory for local review; they
+are not published by this repository.
+
+Both pipelines are explained in the log-odds space, where `eta = f0 + Σ φ_j` and
+`p = 1 / (1 + exp(−eta))`, but they are not the same kind of object:
+
+| | Logistic regression | Gradient boosting |
+|---|---|---|
+| Attribution | `coefficient × WOE` | framework's native tree-path contributions |
+| Base term `f0` | model intercept | the framework's own base value |
+| Reference meaning | all WOE at zero — not an average customer | tree-path reference — not a chosen customer profile |
+| Relation to Step 9 | points = `−factor × φ_j` (same quantity, rescaled) | no scorecard points exist |
+
+**What is verified, not assumed**
+
+- Contributions plus the base term reconstruct the model's raw output, and
+  `expit` of that reconstruction equals the model's own probability. In the demo
+  run the maximum reconstruction error was `8.9e-16` (logistic) and `1.9e-14`
+  (tree), well inside the `1e-8` acceptance bound.
+- Business grouping sums contributions **with their signs** inside a group, so
+  the total is preserved; grouping never turns a +0.7 and a −0.6 into 1.3.
+- Every feature must be registered in `BASE_FEATURE_GROUPS`, otherwise the
+  explainer raises instead of inventing a plausible-sounding reason from an
+  unknown variable name. Reason codes come only from positive group
+  contributions, above a small numerical-noise floor.
+
+**Boundaries that are enforced in wording and in code**
+
+- Step 9's per-variable points are a linear decomposition, **not** Shapley values;
+  this step keeps calling them "logistic linear contributions".
+- Step 8's training split gain answers "which variables reduced loss during
+  training", not "why this application scored high"; it is not used as a local
+  explanation here.
+- The two references differ, so contribution magnitudes are not comparable
+  across models. Both may still be inspected to see which information each model
+  leans on.
+- A contribution is not a percentage point: `+0.2` in log-odds is not "risk up by
+  20%". Positive means it pushes the model output up relative to the reference,
+  and it does not mean the application should be rejected — a positive group can
+  be offset by negative ones.
+- Missing values, the `365243` sentinel and first-seen bins are data-coverage
+  flags. They never become "unemployed", "fraudulent" or "concealed" statements.
+- Reason codes are worded as `…相对于当前解释基准推高模型风险输出，请结合数据
+  来源进行内部复核`, never as "reject the loan because …". Producing a formal
+  decision would need approval policy, legal review, customer-notification rules
+  and a data-usage mandate that this project does not have.
+- Age and its proxies stay an internal diagnostic. They are not cleared for use
+  in real credit decisions or customer communications.
+- The explainer works on a deep copy of the fitted model, so later edits to the
+  source object cannot silently change the explanations. That is object
+  isolation, not version management for code, data, model or reason-code rules.
+- Tree-path attribution is not the only possible attribution scheme, and it
+  fixes no external background sample. Additivity does not make an explanation
+  unique and does not make it causal, especially when features are correlated.
+
+**Demo run on the synthetic table** (200 validation applications, `top_k = 3`;
+the mean signed contribution is not centred on zero because the reference is not
+the average applicant — the base term carries the average level):
+
+| Model | Top groups by mean absolute contribution |
+|---|---|
+| Logistic | 还款金额与收入相对规模 1.7595 (−0.4756), 外部评分信息 1.0483 (−0.1500), 本次还款金额 0.4766 (−0.1110) |
+| Boosting | 还款金额与收入相对规模 2.2529 (−0.2141), 外部评分信息 1.2205 (−0.1070), 本次还款金额 0.3405 (+0.0072) |
+
+The two models lean on the same information here, but the numbers are not
+comparable magnitudes: the references differ, and the label is the dataset's own
+definition rather than a verified regulatory default.
+
 ## Current limitations (kept explicit)
 
 - The Home Credit split in this repository is a stratified random holdout, **not**
@@ -747,6 +831,15 @@ silently dropped.
 - In real monitoring, input drift can be refreshed quickly but calibration and
   performance need matured labels. Applications whose outcome window has not
   closed must not be recorded as good, which this public dataset cannot support.
+- Step 12 explanations describe how each model used its inputs; they are not
+  causal statements and cannot show what would happen if a value changed. Group
+  contributions can cancel internally, so the per-variable detail has to be kept
+  alongside the group view.
+- The internal reason codes are an unreviewed prototype: no approval policy,
+  legal review, customer-notification wording or data-usage mandate stands behind
+  them, and no approval threshold has been chosen.
+- Age-related features remain in the internal explanation only; their use in
+  real credit decisions would need a separate fairness and compliance review.
 
 ## Reproducibility
 
