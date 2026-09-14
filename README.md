@@ -10,7 +10,7 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Steps 1–2 (data acquisition and database feature layer) — complete.**
+**Steps 1–3 (data layer, database feature layer, leakage-safe splitting) — complete.**
 
 Roadmap:
 
@@ -18,7 +18,7 @@ Roadmap:
 |------|---------|--------|
 | 1 | Data acquisition, table structure, data dictionary, raw loading checks | Done |
 | 2 | PostgreSQL ingestion and SQL aggregation of the 1:N bureau table | Done |
-| 3 | Feature engineering on the 1:N tables (bureau, previous applications, installments) | Planned |
+| 3 | Train / validation / out-of-time splitting with leakage discipline | Done |
 | 4 | Feature selection and business-driven feature review | Planned |
 | 5 | Model training with out-of-sample validation (logistic regression baseline, GBDT) | Planned |
 | 6 | Model evaluation: AUC, KS, gain/lift, calibration, cutoff selection | Planned |
@@ -51,12 +51,14 @@ The main table has one row per loan application (about 300k rows) with the targe
 credit-risk-modeling/
   src/data_layer/load_raw.py       # Step 1: raw loading and integrity checks
   src/data_layer/ingest_to_db.py   # Step 2: chunked CSV -> PostgreSQL ingestion
+  src/data_layer/split_data.py     # Step 3: stratified and temporal splitting
   sql/01_create_tables.sql         # Step 2: raw table DDL
   sql/02_aggregate_bureau.sql      # Step 2: bureau -> one row per customer
   sql/03_build_model_table.sql     # Step 2: LEFT JOIN into the modelling table
   tests/test_load_raw.py           # loading-layer tests
   tests/test_aggregation.py        # SQL aggregation and LEFT JOIN semantics
   tests/test_ingest_to_db.py       # ingestion tests (SQLite stand-in)
+  tests/test_split_data.py         # split sizes, bad rates, no-leakage checks
   data/data_dictionary.md          # field-level business meaning (Step 1 output)
   docker-compose.yml               # local PostgreSQL
   .github/workflows/ci.yml         # CI: pytest + PostgreSQL SQL validation
@@ -105,6 +107,41 @@ modelling layer.
   negative.
 - Ingestion only writes the columns defined in the DDL, lower-cases CSV headers,
   and clears the table first so the load is idempotent.
+
+## Step 3: splitting and leakage discipline
+
+```python
+from src.data_layer.split_data import stratified_split, temporal_split
+
+split = stratified_split(df)          # Home Credit: no timestamp available
+print(split.summary())                # sizes and bad rates per split
+
+split = temporal_split(df, time_col="issue_d")   # timestamped data
+print(split.meta["time_ranges"])      # auditable time boundaries
+```
+
+**Why out-of-time (OOT) validation.** A credit model is always applied to future
+applicants, so a random split overstates performance: the training set contains
+information from the future. The standard three-way split is
+`train` (fit parameters) | `valid` (tuning and cut-off selection) | `oot` (opened
+once, at final evaluation).
+
+**Honest limitation.** The Home Credit main table has no application date, so the
+OOT set here is *simulated* with stratified sampling and this is stated in
+`DataSplit.meta`. The code also implements a true temporal split for datasets
+that do have a timestamp (for example LendingClub's `issue_d`), so the correct
+methodology is available and testable.
+
+**Leakage rules enforced in this project**
+
+1. The OOT set is opened once. All tuning, feature selection and cut-off choice
+   use train/validation only.
+2. No feature may use information dated after the application moment (label
+   leakage).
+3. Binning and WOE must be fitted on the training set only and then applied to
+   validation and OOT (implemented in Step 6).
+4. The ID column is kept in `X` for traceability and must be dropped before model
+   training (Step 7).
 
 ## Business notes already captured in Step 1
 
