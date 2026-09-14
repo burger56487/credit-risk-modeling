@@ -328,3 +328,29 @@ def test_metadata_records_what_the_intervals_do_not_cover(sample):
     # Fewer than 1000 draws and a small class both raise a quality note.
     assert metadata["质量提示"]
     assert metadata["标签零样本数"] + metadata["标签一样本数"] == len(y)
+
+
+def test_large_finite_weights_do_not_overflow():
+    """Individually finite weights must not overflow once accumulated."""
+    y = pd.Series([0, 0, 1, 1])
+    probability = pd.Series([0.1, 0.8, 0.4, 0.9])
+    weights = pd.Series(1e308, index=y.index)
+
+    actual = ranking_metrics(y, probability, weights)
+    expected = ranking_metrics(y, probability)
+
+    for metric in METRIC_NAMES:
+        assert actual[metric] == pytest.approx(expected[metric], abs=1e-12)
+
+
+def test_weights_with_unusable_dynamic_range_rejected():
+    """A weight that underflows after normalisation cannot be trusted."""
+    y = pd.Series([0, 0, 1, 1])
+    probability = pd.Series([0.1, 0.8, 0.4, 0.9])
+    weights = pd.Series([1e308, 1e-300, 1.0, 1.0], index=y.index)
+
+    with pytest.raises(ValueError, match="下溢"):
+        ranking_metrics(y, probability, weights)
+
+    with pytest.raises(ValueError, match="同时保留两类样本"):
+        ranking_metrics(y, probability, pd.Series(0.0, index=y.index))

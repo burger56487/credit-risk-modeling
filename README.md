@@ -10,11 +10,11 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Steps 1–10 complete** (data layer, database feature layer, leakage-safe splitting,
+**Steps 1–11 complete** (data layer, database feature layer, leakage-safe splitting,
 cleaning decisions, business features, train-only binning and WOE/IV encoding, the
 end-to-end logistic-regression baseline, the gradient-boosting comparison, the
-scorecard scaling with per-variable decomposition, and the paired resampling
-comparison of the two pipelines).
+scorecard scaling with per-variable decomposition, the paired resampling comparison
+of the two pipelines, and the calibration and distribution-stability diagnostics).
 
 Roadmap:
 
@@ -30,7 +30,8 @@ Roadmap:
 | 8 | Gradient-boosting comparison on the same split, scored fairly against the scorecard | Done |
 | 9 | Scorecard scaling: probability to points, and per-variable score decomposition | Done |
 | 10 | Discrimination validation with paired resampling confidence intervals | Done |
-| 11 | Probability calibration diagnostics and input-distribution stability | Planned |
+| 11 | Probability calibration diagnostics and input-distribution stability | Done |
+| 12 | Model explanation and reason-code prototype | Planned |
 
 ## Dataset
 
@@ -68,6 +69,7 @@ credit-risk-modeling/
   src/models/scorecard.py          # Step 9: score scale and points decomposition
   src/models/configs.py            # frozen model configurations shared by runners
   src/evaluation/discrimination.py # Step 10: ranking metrics + paired bootstrap
+  src/evaluation/calibration_stability.py  # Step 11: calibration + drift checks
   sql/01_create_tables.sql         # Step 2: raw table DDL
   sql/02_aggregate_bureau.sql      # Step 2: bureau -> one row per customer
   sql/03_build_model_table.sql     # Step 2: LEFT JOIN into the modelling table
@@ -84,10 +86,13 @@ credit-risk-modeling/
   tests/test_scorecard_runner.py   # Step 9 runner end to end
   tests/test_discrimination.py     # weighted metrics, pairing, interval method
   tests/test_discrimination_runner.py  # Step 10 runner end to end
+  tests/test_calibration_stability.py  # calibration maths, PSI, edge cases
+  tests/test_diagnostics_runner.py     # Step 11 runner end to end
   tests/conftest.py                # synthetic modelling table shared by runners
   scripts/run_step_08_comparison.py  # one shared split: logistic vs boosting
   scripts/run_step_09_scorecard.py   # score scale, decomposition and audit
   scripts/run_step_10_discrimination.py  # paired bootstrap on the same split
+  scripts/run_step_11_diagnostics.py     # calibration + stability reports
   data/data_dictionary.md          # field-level business meaning (Step 1 output)
   docker-compose.yml               # local PostgreSQL
   .github/workflows/ci.yml         # CI: pytest + PostgreSQL SQL validation
@@ -595,6 +600,92 @@ The bootstrap optimises away repeated sorting: each model is sorted once and a
 draw is just a weight vector, which is equivalent to duplicating rows but avoids
 re-ranking 2000 times.
 
+## Step 11: calibration and distribution stability
+
+```bash
+python scripts/run_step_11_diagnostics.py \
+  --model-table data/processed/model_table.csv \
+  --out-dir reports/step_11
+```
+
+Three questions that must not be merged into one number:
+
+| Question | Method | Answered by |
+|---|---|---|
+| Does the ranking work? | AUC / KS / average precision | Step 10 |
+| Are the probabilities accurate? | calibration bins, Brier, log loss | this step |
+| Did the population move? | drift index on a fixed reference binning, missing and out-of-range checks | this step |
+
+Good ranking does not imply good calibration, and a stable distribution does not
+imply a working model.
+
+**Calibration diagnostics**
+
+- Bin edges are fixed equal-width probability intervals chosen in advance, never
+  from the validation labels. The rule is right-closed, with an inner-edge value
+  joining the lower bin, 0 in the first bin and 1 in the last.
+- An empty bin keeps a missing observed rate; it is never recorded as zero risk.
+  A bin with no observed events still gets a Wilson interval whose upper bound is
+  above zero — ten samples with no event do not prove a zero rate.
+- Bins below `min_bin_samples` are flagged so weak evidence is not read as a
+  rule, and the per-bin table is always reported because a single overall number
+  can hide over- and under-estimation that cancel out.
+- The bin-level intervals describe the observed label rate inside that bin. They
+  exclude model re-training and are not joint intervals across bins.
+- Probabilities of exactly 0 or 1 are allowed here (unlike the Step 9 log-odds
+  conversion, which requires a value strictly inside the range). Log loss uses
+  the library's floating-point protection, so a confidently wrong endpoint
+  gives a large finite penalty rather than a mathematical infinity.
+- No calibrator is fitted. The validation set is used to diagnose probabilities,
+  not to fit one and then re-report a "post-calibration" effect on the same data.
+
+**Distribution stability**
+
+- Reference bins come from the training split and are re-used unchanged on
+  current data, because a re-fitted binning would compare two different rulers.
+  Missing values always have their own bin, so they can never be dropped from
+  the share comparison.
+- Smoothing is applied to the shares with one shared `epsilon`, so two samples
+  with identical proportions give an index of exactly zero even when their sizes
+  differ. Adding a constant to counts instead would not have that property.
+- The index still depends on the binning and the smoothing strength, so values
+  are only comparable within one configuration.
+- A constant reference column has a single numeric bin, so values far outside its
+  range can still land in that bin and produce a zero index. The report therefore
+  also carries the current missing rate, the share of bins never seen in the
+  reference, and the shares below and above the reference range.
+- Equal per-variable distributions do not prove that the correlation structure
+  between variables is unchanged.
+
+**What this step is not.** It is not a value-at-risk coverage test, and the index
+is not a model-validity test: no empirical cut-off such as "above 0.25 means
+failed" is encoded anywhere. It is also not a time-stability validation — with no
+reliable application date it compares a random holdout against the training
+distribution, and the training side is in-sample, so part of any gap may be
+overfitting rather than a change in the applicant population.
+
+**Demo run on the synthetic table** (3600 training / 1200 validation rows,
+10 calibration bins; synthetic data, not Home Credit):
+
+| Model | Mean prediction | Observed rate | Overall bias | Brier | Log loss | Bin-weighted absolute error |
+|---|---|---|---|---|---|---|
+| Logistic | 0.3734 | 0.3550 | +0.0184 | 0.1026 | 0.3298 | 0.0231 |
+| Boosting | 0.3669 | 0.3550 | +0.0119 | 0.1035 | 0.3380 | 0.0362 |
+
+Both models slightly over-estimate on average, and the per-bin table shows why
+the overall number is not enough: the largest single-bin gap for the logistic
+model is +0.1645 in a bin holding 39 rows. Prediction drift is small
+(`0.0075` logistic, `0.0158` boosting) and feature drift tops out at `0.0091`,
+which is expected on a random holdout and is **not** evidence of future-month
+stability.
+
+This step also fixed a numerical edge in Step 10: `ranking_metrics` weights were
+accumulated directly, so several very large but individually finite weights could
+overflow when summed. Weights are now normalised by their maximum first, which
+leaves the metrics unchanged but keeps the accumulation finite; a weight that
+would underflow to zero during normalisation is rejected instead of being
+silently dropped.
+
 ## Current limitations (kept explicit)
 
 - The Home Credit split in this repository is a stratified random holdout, **not**
@@ -646,6 +737,16 @@ re-ranking 2000 times.
   resampling cannot remove the resulting selection bias.
 - Two thousand draws is a compute budget, not a guarantee that the tail
   percentiles are stable for every sample size and confidence level.
+- The Step 11 drift numbers compare a random holdout with the training
+  distribution. Without a reliable application timestamp they are not a
+  time-stability check, and the training side is an in-sample fit, so part of any
+  gap may be overfitting rather than population change.
+- Calibration is diagnosed on a validation set that has already been inspected;
+  no calibrator is fitted, and if one is added later it needs its own calibration
+  split with a re-declared evaluation protocol.
+- In real monitoring, input drift can be refreshed quickly but calibration and
+  performance need matured labels. Applications whose outcome window has not
+  closed must not be recorded as good, which this public dataset cannot support.
 
 ## Reproducibility
 

@@ -95,7 +95,21 @@ class _RankMetricCache:
 
     def evaluate(self, weights: np.ndarray) -> np.ndarray:
         """Compute the three ranking metrics from record counts or weights."""
-        sorted_weights = weights[self.order]
+        # Multiplying every weight by the same positive constant leaves the
+        # ranking metrics unchanged, so normalise first: large finite weights
+        # could otherwise overflow once they are accumulated.
+        scale = float(np.max(weights))
+        if scale <= 0:
+            raise ValueError("加权后必须同时保留两类样本。")
+
+        normalized_weights = weights / scale
+
+        if ((weights > 0) & (normalized_weights == 0)).any():
+            raise ValueError(
+                "权重动态范围过大，归一化发生下溢，不能可靠计算。"
+            )
+
+        sorted_weights = normalized_weights[self.order]
 
         cumulative_bad = np.cumsum(
             sorted_weights * self.sorted_target
