@@ -1,13 +1,18 @@
-"""Tests for the Step 8 comparison runner and its input guards."""
+"""Tests for the Step 8 comparison runner and the shared input guards."""
 import hashlib
 import importlib.util
 import json
 from pathlib import Path
 from types import SimpleNamespace
 
-import numpy as np
 import pandas as pd
 import pytest
+
+from src.data_layer.model_table import (
+    check_split_ids,
+    file_digest,
+    load_model_table,
+)
 
 
 RUNNER_PATH = (
@@ -27,99 +32,65 @@ def runner():
     return module
 
 
-def write_model_table(path: Path, n: int = 900, seed: int = 5) -> Path:
-    """Minimal table with the raw columns the runner requires."""
-    rng = np.random.default_rng(seed)
-    score = rng.uniform(0.0, 1.0, size=n)
-    leverage = rng.uniform(0.02, 0.5, size=n)
-    logit = 1.0 - 5.0 * score + 3.0 * leverage
-    target = (rng.uniform(size=n) < 1 / (1 + np.exp(-logit))).astype("int64")
-
-    frame = pd.DataFrame(
-        {
-            "sk_id_curr": np.arange(5000, 5000 + n),
-            "target": target,
-            "amt_income_total": rng.uniform(50000, 200000, size=n),
-            "amt_credit": rng.uniform(20000, 400000, size=n),
-            "amt_annuity": rng.uniform(5000, 30000, size=n),
-            "days_birth": -rng.integers(7000, 25000, size=n).astype("float64"),
-            "days_employed": -rng.integers(0, 14000, size=n).astype("float64"),
-            "ext_source_1": score,
-            "ext_source_2": np.clip(score + rng.normal(0, 0.1, n), 0.01, 0.99),
-            "ext_source_3": rng.uniform(0.0, 1.0, size=n),
-            "bureau_cnt": rng.integers(0, 10, size=n).astype("float64"),
-            "bureau_debt_total": rng.uniform(0, 300000, size=n),
-        }
-    )
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    frame.to_csv(path, index=False)
-    return path
-
-
-def test_missing_file_and_columns_rejected(runner, tmp_path):
+def test_missing_file_and_columns_rejected(write_model_table):
     with pytest.raises(FileNotFoundError, match="找不到建模表"):
-        runner.load_model_table(tmp_path / "absent.csv")
+        load_model_table(Path("absent") / "absent.csv")
 
-    table = write_model_table(tmp_path / "partial.csv", n=40)
+    table = write_model_table("partial_dropped.csv", n=40)
     partial = pd.read_csv(table).drop(columns=["amt_credit"])
-    partial_path = tmp_path / "partial_dropped.csv"
-    partial.to_csv(partial_path, index=False)
+    partial.to_csv(table, index=False)
 
     with pytest.raises(ValueError, match="缺少字段"):
-        runner.load_model_table(partial_path)
+        load_model_table(table)
 
 
-def test_duplicate_application_ids_rejected(runner, tmp_path):
-    table = write_model_table(tmp_path / "table.csv", n=40)
+def test_duplicate_application_ids_rejected(write_model_table):
+    table = write_model_table("duplicate_ids.csv", n=40)
     frame = pd.read_csv(table)
     frame.loc[1, "sk_id_curr"] = frame.loc[0, "sk_id_curr"]
-    broken = tmp_path / "duplicate_ids.csv"
-    frame.to_csv(broken, index=False)
+    frame.to_csv(table, index=False)
 
     with pytest.raises(ValueError, match="申请编号"):
-        runner.load_model_table(broken)
+        load_model_table(table)
 
 
-def test_overlapping_split_ids_rejected(runner):
+def test_overlapping_split_ids_rejected():
     shared = pd.DataFrame({"sk_id_curr": [1, 2, 3]})
-    split = SimpleNamespace(
-        X_train=shared,
-        X_valid=shared.iloc[:1],
-    )
 
     with pytest.raises(ValueError, match="重复申请编号"):
-        runner.check_split_ids(split)
+        check_split_ids(
+            SimpleNamespace(X_train=shared, X_valid=shared.iloc[:1])
+        )
 
-    disjoint = SimpleNamespace(
-        X_train=shared,
-        X_valid=pd.DataFrame({"sk_id_curr": [4, 5]}),
-    )
-    runner.check_split_ids(disjoint)  # must not raise
+    check_split_ids(
+        SimpleNamespace(
+            X_train=shared,
+            X_valid=pd.DataFrame({"sk_id_curr": [4, 5]}),
+        )
+    )  # must not raise
 
 
-def test_file_digest_matches_hashlib(runner, tmp_path):
-    table = write_model_table(tmp_path / "digest.csv", n=30)
+def test_file_digest_matches_hashlib(write_model_table):
+    table = write_model_table("digest.csv", n=30)
 
     expected = hashlib.sha256(table.read_bytes()).hexdigest()
-    assert runner.file_digest(table) == expected
+    assert file_digest(table) == expected
 
 
-def test_main_writes_reports_and_metadata(runner, tmp_path, monkeypatch):
-    table = write_model_table(tmp_path / "model_table.csv", n=900)
+def test_main_writes_reports_and_metadata(
+    runner, write_model_table, tmp_path
+):
+    table = write_model_table("model_table.csv", n=900)
     out_dir = tmp_path / "step_08"
 
-    monkeypatch.setattr(
-        "sys.argv",
+    runner.main(
         [
-            "run_step_08_comparison.py",
             "--model-table",
             str(table),
             "--out-dir",
             str(out_dir),
-        ],
+        ]
     )
-    runner.main()
 
     expected_files = {
         "validation_comparison.csv",
@@ -130,8 +101,7 @@ def test_main_writes_reports_and_metadata(runner, tmp_path, monkeypatch):
         "tree_training_gain.csv",
         "experiment_metadata.json",
     }
-    written = {path.name for path in out_dir.iterdir()}
-    assert written == expected_files
+    assert {path.name for path in out_dir.iterdir()} == expected_files
 
     comparison = pd.read_csv(
         out_dir / "validation_comparison.csv", index_col=0
@@ -149,4 +119,4 @@ def test_main_writes_reports_and_metadata(runner, tmp_path, monkeypatch):
     assert metadata["是否使用最终测试集"] is False
     assert metadata["是否使用验证集提前停止"] is False
     assert metadata["树模型实际训练轮数"] >= 1
-    assert metadata["输入数据"]["SHA256"] == runner.file_digest(table)
+    assert metadata["输入数据"]["SHA256"] == file_digest(table)

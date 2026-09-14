@@ -10,9 +10,10 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Steps 1–8 complete** (data layer, database feature layer, leakage-safe splitting,
+**Steps 1–9 complete** (data layer, database feature layer, leakage-safe splitting,
 cleaning decisions, business features, train-only binning and WOE/IV encoding, the
-end-to-end logistic-regression baseline, and the gradient-boosting comparison).
+end-to-end logistic-regression baseline, the gradient-boosting comparison, and the
+scorecard scaling with per-variable decomposition).
 
 Roadmap:
 
@@ -26,7 +27,8 @@ Roadmap:
 | 6 | WOE / IV encoding on the training bins (zero cells, unknown bins, smoothing) | Done |
 | 7 | Logistic-regression scorecard baseline, evaluation and monitoring metrics | Done |
 | 8 | Gradient-boosting comparison on the same split, scored fairly against the scorecard | Done |
-| 9 | Scorecard scaling: probability to points, and per-variable score decomposition | Planned |
+| 9 | Scorecard scaling: probability to points, and per-variable score decomposition | Done |
+| 10 | Discrimination validation with paired resampling confidence intervals | Planned |
 
 ## Dataset
 
@@ -56,10 +58,12 @@ credit-risk-modeling/
   src/data_layer/load_raw.py       # Step 1: raw loading and integrity checks
   src/data_layer/ingest_to_db.py   # Step 2: chunked CSV -> PostgreSQL ingestion
   src/data_layer/split_data.py     # Step 3: stratified and temporal splitting
+  src/data_layer/model_table.py    # modelling-table loading and integrity guards
   src/features/engineering.py      # Step 5: business features + train-only binning
   src/features/woe.py              # Step 6: WOE/IV encoder + audit reports
   src/models/logistic.py           # Step 7: end-to-end logistic baseline + metrics
   src/models/boosting.py           # Step 8: gradient-boosting comparison pipeline
+  src/models/scorecard.py          # Step 9: score scale and points decomposition
   sql/01_create_tables.sql         # Step 2: raw table DDL
   sql/02_aggregate_bureau.sql      # Step 2: bureau -> one row per customer
   sql/03_build_model_table.sql     # Step 2: LEFT JOIN into the modelling table
@@ -72,7 +76,11 @@ credit-risk-modeling/
   tests/test_logistic.py           # baseline chain, fitted-state discipline, metrics
   tests/test_boosting.py           # tree pipeline, duplicate/missing handling
   tests/test_comparison_runner.py  # Step 8 runner guards and written reports
+  tests/test_scorecard.py          # scale identities, boundaries, decomposition
+  tests/test_scorecard_runner.py   # Step 9 runner end to end
+  tests/conftest.py                # synthetic modelling table shared by runners
   scripts/run_step_08_comparison.py  # one shared split: logistic vs boosting
+  scripts/run_step_09_scorecard.py   # score scale, decomposition and audit
   data/data_dictionary.md          # field-level business meaning (Step 1 output)
   docker-compose.yml               # local PostgreSQL
   .github/workflows/ci.yml         # CI: pytest + PostgreSQL SQL validation
@@ -414,6 +422,81 @@ Split gain and logistic coefficients are not comparable quantities. Split gain
 is a training-time statistic, not a causal contribution and not the benefit
 measured on validation data, so it is exported for inspection only.
 
+## Step 9: score scaling and per-variable decomposition
+
+```bash
+python scripts/run_step_09_scorecard.py \
+  --model-table data/processed/model_table.csv \
+  --out-dir reports/step_09
+```
+
+The runner refits the Step 7 logistic pipeline on the same train split as Step 8,
+converts the validation scores, checks the two identities below before writing
+anything, and then saves the scale, the per-bin points table and an audit file.
+The sealed test split is not opened and the validation labels are not used to
+adjust the scale.
+
+```
+logit(p) = intercept + Σ_j (coef_j · w_j)
+S        = (offset − factor · intercept) + Σ_j (−factor · coef_j · w_j)
+           \_______ base points ______/   \___ variable points ___/
+```
+
+```python
+from src.models.scorecard import LogisticScorecard, ScoreScale
+
+scale = ScoreScale(base_score=600.0, base_bad_good_odds=1.0 / 50.0,
+                   points_to_double_odds=20.0)
+scorecard = LogisticScorecard(model=logistic_model, scale=scale)
+
+scores = scorecard.score(valid_raw)          # log_odds, probability, raw/display
+parts = scorecard.contributions(valid_raw)   # unrounded variable points
+scorecard.training_bin_table()               # WOE, coefficient and points per bin
+```
+
+**Conventions that are easy to state wrongly**
+
+- What doubles is the **bad-to-good odds**, not the probability, the score or a
+  loss. At `1:50` odds the probability is `1/51 ≈ 1.96%`, and the next anchor at
+  `1:25` is `3.85%`, not `3.92%`.
+- The anchor score (600) is a scale definition only. It is not a cut-off, and it
+  is not a claim that the dataset's real odds are 1:50.
+- The **base points are not the anchor score**: they also absorb the model
+  intercept. In the demo run below the anchor is 600 and the base points are 505.
+- The scale is a monotone transform: it adds no information, does not make a
+  poorly calibrated probability accurate, and does not remove overfitting.
+- Higher score means lower model-estimated risk, so any ranking metric computed
+  from scores must be read in the opposite direction from the probability one.
+- Splitting a total into parts is not causation. A negative variable
+  contribution means the variable lowers the total in this decomposition; it is
+  not a valid standalone rejection reason.
+
+**Numerical discipline**
+
+- Scores come from the model's linear output, not from a rounded probability.
+  That stays finite even where the probability has already saturated.
+- A probability of exactly 0 or 1 raises instead of being clipped silently.
+- Variable points are never rounded before summing; rounding happens once, at
+  the end, and only for the display column (`np.rint`, halves to even).
+- Unknown bins keep the neutral fallback: WOE zero, variable points zero. This is
+  not "no risk" — the other variables and the base points still apply, and the
+  unknown-bin rate still needs monitoring. With the neutral policy the raw score
+  for an all-unknown row equals the base points.
+- Two tolerances gate the written reports: `1e-9` for the component
+  reconstruction and `1e-12` for the probability round trip. These are
+  engineering acceptance settings for the current scale, not permanent
+  mathematical guarantees, and extreme scale parameters need their own checks.
+- The scorecard holds a deep copy of the fitted model, so later edits to the
+  source object cannot silently move the scorecard. That copy is object
+  isolation, not release governance: code, data, dependency and artefact
+  versions still have to be managed together.
+
+**On a synthetic demo table** (6000 rows, bad rate 35.5%, not real Home Credit
+data), the runner produced base points 505.40, a maximum component
+reconstruction error of 1.1e-13 and a maximum probability round-trip error of
+3.9e-16, with validation scores spanning roughly 336 to 687. Those numbers
+exercise the arithmetic; they say nothing about real credit performance.
+
 ## Current limitations (kept explicit)
 
 - The Home Credit split in this repository is a stratified random holdout, **not**
@@ -447,6 +530,12 @@ measured on validation data, so it is exported for inspection only.
 - The Step 8 runner records parameters, environment versions and an input file
   digest, which is not yet a full reproduction receipt: the sample split list,
   the code version and a dependency lock file are still missing.
+- The Step 9 scale is a presentation choice, not a calibrated risk statement:
+  the probabilities behind it are uncalibrated and unweighted, no cut-off policy
+  has been chosen, and no per-applicant scores are published by this repository.
+- If a non-linear probability calibration is added later, the linear
+  per-variable points no longer correspond exactly to the calibrated
+  probability; the two must then be labelled and versioned separately.
 
 ## Reproducibility
 
