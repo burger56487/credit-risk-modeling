@@ -1,11 +1,11 @@
-"""Step 3: data splitting into train / validation / out-of-time (OOT) sets.
+"""Step 3: data splitting into train / validation / test sets.
 
 Two modes are supported:
 
-* ``stratified`` — stratified random split, for datasets without an application
-  timestamp (Home Credit). The OOT set is simulated and this limitation is
-  documented in the README.
-* ``temporal`` — out-of-time split, for datasets with a timestamp
+* ``stratified`` — stratified random holdout, for datasets without an
+  application timestamp (Home Credit). This is **not** an out-of-time test and
+  is not described as one.
+* ``temporal`` — true out-of-time split, for datasets with a timestamp
   (e.g. LendingClub ``issue_d``). Past data trains, the most recent data tests.
 
 The stratified splitter uses ``numpy`` only, so the data layer keeps a light
@@ -31,10 +31,10 @@ class DataSplit:
 
     X_train: pd.DataFrame
     X_valid: pd.DataFrame
-    X_oot: pd.DataFrame
+    X_test: pd.DataFrame
     y_train: pd.Series
     y_valid: pd.Series
-    y_oot: pd.Series
+    y_test: pd.Series
     meta: dict = field(default_factory=dict)
 
     def summary(self) -> pd.DataFrame:
@@ -43,7 +43,7 @@ class DataSplit:
         for name, y in [
             ("train", self.y_train),
             ("valid", self.y_valid),
-            ("oot", self.y_oot),
+            ("test", self.y_test),
         ]:
             rows.append({
                 "dataset": name,
@@ -107,7 +107,7 @@ def stratified_split(
     rng = np.random.default_rng(random_state)
     y_all = df[target_col].to_numpy()
 
-    oot_idx, rest_idx = _stratified_take(y_all, oot_size, rng)
+    test_idx, rest_idx = _stratified_take(y_all, oot_size, rng)
 
     # valid_size is stated relative to the full dataset, so rescale it to the
     # remaining data after OOT has been removed.
@@ -122,16 +122,16 @@ def stratified_split(
 
     return DataSplit(
         X_train=X.iloc[train_idx], X_valid=X.iloc[valid_idx],
-        X_oot=X.iloc[oot_idx],
+        X_test=X.iloc[test_idx],
         y_train=y.iloc[train_idx], y_valid=y.iloc[valid_idx],
-        y_oot=y.iloc[oot_idx],
+        y_test=y.iloc[test_idx],
         meta={
-            "mode": "stratified",
+            "mode": "stratified_holdout",
             "id_col": id_col,
             "random_state": random_state,
             "limitation": (
-                "Home Credit has no application timestamp; the OOT split is "
-                "simulated by stratified sampling."
+                "Home Credit has no application timestamp, so this is a "
+                "stratified random holdout, not an out-of-time test."
             ),
         },
     )
@@ -185,10 +185,10 @@ def temporal_split(
     return DataSplit(
         X_train=train_df[feature_cols],
         X_valid=valid_df[feature_cols],
-        X_oot=oot_df[feature_cols],
+        X_test=oot_df[feature_cols],
         y_train=train_df[target_col],
         y_valid=valid_df[target_col],
-        y_oot=oot_df[target_col],
-        meta={"mode": "temporal", "time_col": time_col,
+        y_test=oot_df[target_col],
+        meta={"mode": "temporal_oot", "time_col": time_col,
               "time_ranges": time_ranges},
     )
