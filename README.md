@@ -10,8 +10,9 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Steps 1–6 complete** (data layer, database feature layer, leakage-safe splitting,
-cleaning decisions, business features, train-only binning and WOE/IV encoding).
+**Steps 1–7 complete** (data layer, database feature layer, leakage-safe splitting,
+cleaning decisions, business features, train-only binning and WOE/IV encoding, and
+the end-to-end logistic-regression baseline).
 
 Roadmap:
 
@@ -23,7 +24,8 @@ Roadmap:
 | 4 | EDA and cleaning plan; median imputation dropped in favour of a missing bin | Done (decisions implemented in Step 5) |
 | 5 | Business features + train-only quantile binning | Done |
 | 6 | WOE / IV encoding on the training bins (zero cells, unknown bins, smoothing) | Done |
-| 7 | Logistic-regression scorecard baseline, evaluation and monitoring metrics | Planned |
+| 7 | Logistic-regression scorecard baseline, evaluation and monitoring metrics | Done |
+| 8 | Gradient-boosting comparison on the same split, scored fairly against the scorecard | Planned |
 
 ## Dataset
 
@@ -55,6 +57,7 @@ credit-risk-modeling/
   src/data_layer/split_data.py     # Step 3: stratified and temporal splitting
   src/features/engineering.py      # Step 5: business features + train-only binning
   src/features/woe.py              # Step 6: WOE/IV encoder + audit reports
+  src/models/logistic.py           # Step 7: end-to-end logistic baseline + metrics
   sql/01_create_tables.sql         # Step 2: raw table DDL
   sql/02_aggregate_bureau.sql      # Step 2: bureau -> one row per customer
   sql/03_build_model_table.sql     # Step 2: LEFT JOIN into the modelling table
@@ -64,6 +67,7 @@ credit-risk-modeling/
   tests/test_split_data.py         # split sizes, bad rates, no-leakage checks
   tests/test_engineering.py        # sentinel handling, ratios, binning discipline
   tests/test_woe.py                # WOE/IV maths, alignment, unknown-bin policy
+  tests/test_logistic.py           # baseline chain, fitted-state discipline, metrics
   data/data_dictionary.md          # field-level business meaning (Step 1 output)
   docker-compose.yml               # local PostgreSQL
   .github/workflows/ci.yml         # CI: pytest + PostgreSQL SQL validation
@@ -247,6 +251,92 @@ save_woe_reports(encoder, valid_bins, "reports/step_06", candidates)
   encoder must be refitted on each training fold; the IV screen is a univariate
   candidate filter, not the final variable selection.
 
+## Step 7: logistic-regression baseline
+
+```python
+import pandas as pd
+from src.models.logistic import (
+    RiskLogisticModel,
+    evaluate_probabilities,
+    save_baseline_reports,
+)
+
+# Start from the raw, un-imputed split. The chain below is fitted inside fit().
+model = RiskLogisticModel(
+    n_bins=5,          # same binning as Steps 5-6
+    alpha=0.5,         # smoothing, avoids infinite WOE in single-class bins
+    iv_threshold=0.02, # pre-declared IV screen
+    C=1.0,             # inverse regularisation strength, fixed (not tuned)
+    max_iter=2000,
+)
+model.fit(split.X_train, split.y_train)
+
+train_probability = model.predict_bad_probability(split.X_train)
+valid_probability = model.predict_bad_probability(split.X_valid)
+
+# Reference point: no applicant features at all, just the training bad rate.
+constant = pd.Series(model.training_bad_rate_, index=split.y_valid.index)
+
+metrics = pd.DataFrame(
+    {
+        "训练集回代诊断": evaluate_probabilities(split.y_train, train_probability),
+        "验证集逻辑回归": evaluate_probabilities(split.y_valid, valid_probability),
+        "验证集常数基准": evaluate_probabilities(split.y_valid, constant),
+    }
+).T
+
+save_baseline_reports(
+    model, metrics, model.unknown_bin_report(split.X_valid), "reports/step_07"
+)
+print(model.selection_report_)   # per-feature keep/delete reason
+print(model.coefficient_report_)
+```
+
+`fit` learns the whole chain from raw application features — business rules,
+train-only quantile edges, train-only WOE, the IV screen, removal of constant
+and exactly duplicated columns, then a regularised logistic regression.
+`predict*` re-applies those fitted objects, so scoring cannot silently re-fit a
+binner or change the feature order. Wrapping the chain does not grant data
+permissions: passing validation data to `fit` would still leak.
+
+**Configuration choices, and what they do not claim**
+
+| Choice | Value | Reason |
+|--------|-------|--------|
+| Bins | 5 | Inherited from Step 5; not claimed to be optimal |
+| Smoothing | 0.5 | Stops single-class bins producing infinite WOE |
+| IV screen | 0.02 | Pre-declared candidate filter, not final selection |
+| Regularisation | `C = 1.0`, fixed | No large search in this baseline |
+| Class weight | none | Keeps the output interpretable as the sample's own bad rate |
+| Column handling | drop constants and exact duplicates | Removes obvious redundancy only |
+| Final test set | not used | Kept sealed |
+
+Note the direction of `C`: it is the **inverse** penalty strength, so a smaller
+`C` means a stronger penalty.
+
+**What is deliberately not claimed**
+
+- Training-set performance is an in-sample refit diagnostic, not generalisation;
+  only the validation numbers speak to that, and the test set stays sealed.
+- No significance statements. After IV screening and regularisation, ordinary
+  regression p-values do not apply, so coefficients are reported as model
+  associations with a sign and a magnitude only.
+- Regularisation does not remove collinearity. Highly correlated features can
+  still coexist, so a coefficient is a conditional association inside this
+  model, not a causal effect.
+- No class weighting, up-sampling or down-sampling, so the reference probability
+  keeps its meaning; calibration is assessed separately.
+- A negative coefficient is not automatically a bug, and it is not silently
+  flipped to a positive number.
+- `predict`'s 0.5 threshold exists only to satisfy the standard classifier
+  interface; it is not an approval policy.
+- Non-convergence is escalated to a `RuntimeError` instead of being ignored.
+- Reports are aggregated in this repository; no per-applicant predictions are
+  published.
+
+The validation numbers themselves are produced by running the script on the real
+split and are not asserted anywhere in the code or the tests.
+
 ## Current limitations (kept explicit)
 
 - The Home Credit split in this repository is a stratified random holdout, **not**
@@ -264,6 +354,13 @@ save_woe_reports(encoder, valid_bins, "reports/step_06", candidates)
   model fit for real lending decisions.
 - The Step 6 reports are audit artefacts, not deployment files: the bin edges,
   encoder, feature order and model must be versioned together.
+- The Step 7 baseline is a first reference point, not a validated scorecard: the
+  regularisation stays fixed, calibration, stability over time and threshold
+  selection are not yet done, and the metrics table is only meaningful once the
+  script has been run on the real split.
+- The Step 7 evaluation metrics are computed on a stratified random holdout, so
+  they describe this sample, not the model's behaviour on a future applicant
+  population.
 
 ## Reproducibility
 
