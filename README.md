@@ -190,9 +190,64 @@ psql "$CREDITRISK_DB_URL" -f sql/01_create_tables.sql
 # 3. only for a database created by the earlier version: migrate it explicitly
 psql "$CREDITRISK_DB_URL" -v ON_ERROR_STOP=1 -f sql/05_migrate_step2_contract.sql
 
-# 4. load, aggregate and build the wide table
-python -m src.data_layer.ingest_to_db
+# 4. load, aggregate and build the wide table in ONE transaction
+python -m src.data_layer.ingest_to_db --load-id 研究装载_第一版
 ```
+
+**One transaction, four tables.** The loader publishes `application_train`,
+`bureau`, `feat_bureau` and `model_input` as a single unit:
+
+```
+check configuration, contract and input files
+  -> controlled local snapshot + SHA-256 of those exact bytes
+  -> one database transaction
+  -> transaction write lock (bounded wait, default 5 s)
+  -> structure check against the frozen contract
+  -> temp staging tables with the same column contract
+  -> chunked native COPY on the same connection
+  -> validate read vs staged rows
+  -> replace both source tables (delete + insert, never drop/recreate)
+  -> run sql/02_aggregate_bureau.sql and sql/03_build_model_table.sql
+  -> reconcile the four tables
+  -> write the success record
+  -> one commit
+```
+
+Any failure rolls everything back, so the previous usable version stays intact and
+no success record is written; the failed attempt is recorded afterwards on a
+separate connection with its stage, error type and SQLSTATE only. Database error
+text can quote raw field values, so it is deliberately not stored.
+
+Why delete + insert rather than truncate or drop/recreate: the table object, its
+primary key and its indexes survive, and readers keep seeing the previous
+committed version until the commit. The accepted cost is more WAL, more old row
+versions and more transaction resources — this is a correctness-first choice for a
+research project, not a high-throughput ingestion design, and it is not claimed to
+fit any data size.
+
+On concurrency and reads: the advisory lock keeps two *pipeline* loads from
+refreshing the four tables at the same time, and it does not replace database
+permissions. A single query sees one committed version; a reader that needs
+several queries to agree must use its own snapshot transaction — one write
+transaction does not make another session's separate queries consistent.
+
+Numbers are loaded as text and cast by the database, so amounts never take a
+float round-trip. An empty field becomes NULL (that is this contract's NULL rule,
+not the reader's missing-value inference), and a field like `NA` stays the text it
+is.
+
+**Every successful load leaves evidence**: load id, contract version, both file
+names with byte size and SHA-256 of the loaded snapshot, normalised headers with
+loaded and not-loaded columns, file/staged/persistent row counts, linkage counts
+(applications with and without bureau records, bureau records outside the labelled
+set), missing counts for the key amount/status/overdue fields, and the digests of
+the SQL scripts that produced the derived tables. Because the record is written in
+the same transaction, it can never survive a rolled-back load.
+
+The pipeline is PostgreSQL-only on purpose: `COPY`, advisory locks and temporary
+tables are what make the atomic behaviour possible. In-memory databases are used
+elsewhere only for fast semantic tests and are not evidence of transactional
+correctness.
 
 **Scope of this pipeline (frozen field contract).** The database input is an
 explicit **projection**, not the whole download: `application_train.csv` (12
