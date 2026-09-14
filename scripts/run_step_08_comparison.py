@@ -27,8 +27,8 @@ from src.data_layer.model_table import (
     file_digest,
     load_model_table,
 )
-from src.models.boosting import RiskBoostingModel
-from src.models.logistic import RiskLogisticModel, evaluate_probabilities
+from src.models.configs import build_boosting_model, build_logistic_model
+from src.models.logistic import evaluate_probabilities
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -60,22 +60,8 @@ def main(argv: list[str] | None = None) -> None:
     train_raw = split.X_train.copy()
     valid_raw = split.X_valid.copy()
 
-    logistic_model = RiskLogisticModel(
-        n_bins=5,
-        alpha=0.5,
-        iv_threshold=0.02,
-        C=1.0,
-        max_iter=2000,
-    )
-    boosting_model = RiskBoostingModel(
-        n_estimators=300,
-        learning_rate=0.05,
-        num_leaves=15,
-        min_child_samples=100,
-        reg_lambda=1.0,
-        random_state=arguments.random_state,
-        n_jobs=1,
-    )
+    logistic_model = build_logistic_model()
+    boosting_model = build_boosting_model(random_state=arguments.random_state)
 
     logistic_model.fit(train_raw, split.y_train)
     boosting_model.fit(train_raw, split.y_train)

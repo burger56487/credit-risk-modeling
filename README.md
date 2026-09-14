@@ -10,10 +10,11 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Steps 1–9 complete** (data layer, database feature layer, leakage-safe splitting,
+**Steps 1–10 complete** (data layer, database feature layer, leakage-safe splitting,
 cleaning decisions, business features, train-only binning and WOE/IV encoding, the
-end-to-end logistic-regression baseline, the gradient-boosting comparison, and the
-scorecard scaling with per-variable decomposition).
+end-to-end logistic-regression baseline, the gradient-boosting comparison, the
+scorecard scaling with per-variable decomposition, and the paired resampling
+comparison of the two pipelines).
 
 Roadmap:
 
@@ -28,7 +29,8 @@ Roadmap:
 | 7 | Logistic-regression scorecard baseline, evaluation and monitoring metrics | Done |
 | 8 | Gradient-boosting comparison on the same split, scored fairly against the scorecard | Done |
 | 9 | Scorecard scaling: probability to points, and per-variable score decomposition | Done |
-| 10 | Discrimination validation with paired resampling confidence intervals | Planned |
+| 10 | Discrimination validation with paired resampling confidence intervals | Done |
+| 11 | Probability calibration diagnostics and input-distribution stability | Planned |
 
 ## Dataset
 
@@ -64,6 +66,8 @@ credit-risk-modeling/
   src/models/logistic.py           # Step 7: end-to-end logistic baseline + metrics
   src/models/boosting.py           # Step 8: gradient-boosting comparison pipeline
   src/models/scorecard.py          # Step 9: score scale and points decomposition
+  src/models/configs.py            # frozen model configurations shared by runners
+  src/evaluation/discrimination.py # Step 10: ranking metrics + paired bootstrap
   sql/01_create_tables.sql         # Step 2: raw table DDL
   sql/02_aggregate_bureau.sql      # Step 2: bureau -> one row per customer
   sql/03_build_model_table.sql     # Step 2: LEFT JOIN into the modelling table
@@ -78,9 +82,12 @@ credit-risk-modeling/
   tests/test_comparison_runner.py  # Step 8 runner guards and written reports
   tests/test_scorecard.py          # scale identities, boundaries, decomposition
   tests/test_scorecard_runner.py   # Step 9 runner end to end
+  tests/test_discrimination.py     # weighted metrics, pairing, interval method
+  tests/test_discrimination_runner.py  # Step 10 runner end to end
   tests/conftest.py                # synthetic modelling table shared by runners
   scripts/run_step_08_comparison.py  # one shared split: logistic vs boosting
   scripts/run_step_09_scorecard.py   # score scale, decomposition and audit
+  scripts/run_step_10_discrimination.py  # paired bootstrap on the same split
   data/data_dictionary.md          # field-level business meaning (Step 1 output)
   docker-compose.yml               # local PostgreSQL
   .github/workflows/ci.yml         # CI: pytest + PostgreSQL SQL validation
@@ -497,6 +504,97 @@ reconstruction error of 1.1e-13 and a maximum probability round-trip error of
 3.9e-16, with validation scores spanning roughly 336 to 687. Those numbers
 exercise the arithmetic; they say nothing about real credit performance.
 
+## Step 10: paired resampling of the two pipelines
+
+```bash
+python scripts/run_step_10_discrimination.py \
+  --model-table data/processed/model_table.csv \
+  --out-dir reports/step_10 --n-bootstrap 2000
+```
+
+The question this step answers is not "which number is bigger" but "how stable
+is the gap". Both models are refitted with the frozen configuration from
+[configs.py](src/models/configs.py) on the same train split, scored on the same
+validation rows, then that validation set is resampled **in pairs**:
+
+```
+fixed validation rows + fixed predictions
+            │
+            ▼
+  resample label 0 and label 1 separately, with replacement
+            │
+      one shared draw
+      ┌─────┴─────┐
+      ▼           ▼
+  logistic     boosting
+      └─────┬─────┘
+            ▼
+  record the paired difference, repeat, take percentiles
+```
+
+```python
+from src.evaluation.discrimination import paired_stratified_bootstrap
+
+comparison = paired_stratified_bootstrap(
+    y=split.y_valid,
+    baseline_probability=logistic_valid_probability,
+    challenger_probability=boosting_valid_probability,
+    n_bootstrap=2000, confidence_level=0.95, random_state=42,
+)
+comparison.summary    # point value, both marginal intervals, difference interval
+comparison.draws      # every draw, kept for audit
+comparison.metadata   # protocol and quality notes
+```
+
+**Why the resampling must be paired.** The two models score the same applicants,
+so their metrics are correlated. Each draw therefore uses one occurrence-count
+vector for both models, and the difference interval is read directly from the
+distribution of `challenger − baseline`. Subtracting the endpoints of the two
+separate intervals is not the paired difference interval and is much wider; on
+the demo run below the naive subtraction spans `−0.0298 … 0.0286` (width 0.058)
+against a paired interval of `−0.0079 … 0.0072` (width 0.015).
+
+**Metric conventions**
+
+- Inputs are raw probabilities: larger means the model thinks label 1 is more
+  likely. Credit scores run the other way, so scores are never fed in here.
+- Average precision is `Σ (recall_k − recall_{k−1}) · precision_k`, the same
+  convention as Step 7, not a trapezoidal area.
+- AUC uses trapezoidal integration over the ROC points, with tied predictions
+  accumulated as a group so the result cannot depend on row order.
+- Metric values are cross-checked against scikit-learn's weighted
+  implementations, and occurrence weights are cross-checked against physically
+  duplicating the sampled rows.
+
+**Demo run on the synthetic table** (1200 validation rows, 774 good / 426 bad,
+2000 draws, 3.4 seconds; synthetic data, not Home Credit):
+
+| Metric | Baseline | Baseline interval | Challenger | Challenger interval | Difference | Difference interval |
+|---|---|---|---|---|---|---|
+| AUC | 0.9270 | 0.9111 – 0.9407 | 0.9265 | 0.9109 – 0.9397 | −0.0005 | −0.0079 – 0.0072 |
+| KS | 0.6992 | 0.6614 – 0.7450 | 0.7157 | 0.6791 – 0.7553 | +0.0165 | −0.0151 – 0.0474 |
+| Average precision | 0.8769 | 0.8482 – 0.9033 | 0.8772 | 0.8490 – 0.9038 | +0.0003 | −0.0143 – 0.0156 |
+
+**How to read a difference interval**
+
+- Interval entirely above zero: under the frozen models, this validation sample
+  and the stratified-resampling assumption, the challenger ranks higher and the
+  interval excludes zero. It still is not a claim about future business
+  performance.
+- Interval containing zero (as in the demo above): this sample does not support a
+  stable positive difference. It is **not** proof that the two models are
+  identical — "not enough evidence of a difference" and "evidence of no
+  difference" are different statements.
+- Stable but tiny difference: also ask whether the improvement has business
+  meaning and what the extra complexity and calibration cost is.
+- No significance probabilities are reported here, no metric is picked after the
+  fact to headline it, and the three intervals are separate marginal intervals
+  without a joint coverage guarantee.
+
+The bootstrap optimises away repeated sorting: each model is sorted once and a
+draw is just a weight vector, which is equivalent to duplicating rows but avoids
+re-ranking 2000 times.
+
 ## Current limitations (kept explicit)
 
 - The Home Credit split in this repository is a stratified random holdout, **not**
@@ -536,6 +634,18 @@ exercise the arithmetic; they say nothing about real credit performance.
 - If a non-linear probability calibration is added later, the linear
   per-variable points no longer correspond exactly to the calibrated
   probability; the two must then be labelled and versioned separately.
+- The Step 10 intervals cover one source of uncertainty only: resampling
+  validation records under frozen models and a fixed label ratio. They exclude
+  re-splitting, re-training, feature-selection variance, and any change in the
+  future good/bad mix — which matters most for average precision.
+- Applications are treated as approximately independent sampling units. Unique
+  application IDs do not prove that the same person, household or period of
+  shared stress is absent, so undetected dependence is outside the interval.
+- The validation set has been inspected in earlier steps. These are development
+  numbers under fixed models, not a pre-registered confirmatory experiment, and
+  resampling cannot remove the resulting selection bias.
+- Two thousand draws is a compute budget, not a guarantee that the tail
+  percentiles are stable for every sample size and confidence level.
 
 ## Reproducibility
 

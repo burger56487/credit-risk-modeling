@@ -31,7 +31,7 @@ from src.data_layer.model_table import (
     load_model_table,
 )
 from src.data_layer.split_data import stratified_split
-from src.models.logistic import RiskLogisticModel
+from src.models.configs import build_logistic_model
 from src.models.scorecard import LogisticScorecard, ScoreScale
 
 # Engineering acceptance tolerances for the current scale. They are not a
@@ -72,13 +72,7 @@ def main(argv: list[str] | None = None) -> None:
     train_raw = split.X_train.copy()
     valid_raw = split.X_valid.copy()
 
-    logistic_model = RiskLogisticModel(
-        n_bins=5,
-        alpha=0.5,
-        iv_threshold=0.02,
-        C=1.0,
-        max_iter=2000,
-    ).fit(train_raw, split.y_train)
+    logistic_model = build_logistic_model().fit(train_raw, split.y_train)
 
     scale = ScoreScale(
         base_score=arguments.base_score,
