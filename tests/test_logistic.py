@@ -264,3 +264,75 @@ def test_saved_reports_match_fitted_state(sample, tmp_path):
         model.coefficient_report_["coefficient"],
         check_names=False,
     )
+
+
+def test_end_to_end_on_messy_raw_columns(tmp_path):
+    """The full chain survives missing values, sentinels and invalid amounts."""
+    rng = np.random.default_rng(0)
+    n = 1200
+    index = pd.Index(range(1, n + 1))
+
+    signal = rng.uniform(0.1, 0.9, size=n)
+    labels = (rng.uniform(size=n) < (1.2 - signal)).astype("int64")
+
+    income = rng.uniform(50000, 300000, size=n)
+    income[rng.choice(n, size=30, replace=False)] = np.nan
+    income[rng.choice(n, size=20, replace=False)] = 0.0
+
+    X = pd.DataFrame(
+        {
+            "sk_id_curr": np.arange(n),
+            "amt_income_total": income,
+            "amt_credit": rng.uniform(100000, 900000, size=n),
+            "amt_annuity": rng.uniform(5000, 40000, size=n),
+            "days_birth": -rng.integers(7000, 25000, size=n).astype("float64"),
+            "days_employed": -rng.integers(0, 15000, size=n).astype("float64"),
+            "ext_source_1": signal,
+            "ext_source_2": rng.uniform(0.0, 1.0, size=n),
+            "ext_source_3": rng.uniform(0.0, 1.0, size=n),
+            "bureau_cnt": rng.integers(0, 12, size=n).astype("float64"),
+            "bureau_debt_total": rng.uniform(0, 500000, size=n),
+        },
+        index=index,
+    )
+
+    # Contaminate the raw frame the way the real competition file does: the
+    # employed special code, an impossible birth record, out-of-range scores.
+    X.loc[index[:15], "days_employed"] = 365243.0
+    X.loc[index[15:25], "days_birth"] = 120.0
+    X.loc[index[25:40], "ext_source_1"] = np.nan
+    X.loc[index[40:50], "bureau_debt_total"] = -1.0
+
+    y = pd.Series(labels, index=index, name="target")
+
+    model = RiskLogisticModel(n_bins=5, alpha=0.5, iv_threshold=0.02, C=1.0)
+    model.fit(X, y)
+
+    probability = model.predict_bad_probability(X)
+    pd.testing.assert_index_equal(probability.index, X.index)
+    assert np.isfinite(probability.to_numpy()).all()
+    assert model.selection_report_.loc[
+        "ext_source_1", "selection_reason"
+    ] == "保留"
+
+    metrics = evaluate_probabilities(y, probability)
+    assert set(metrics) == {
+        "样本数",
+        "实际标签一占比",
+        "平均预测概率",
+        "排序曲线下面积",
+        "基尼系数",
+        "最大分布差异",
+        "平均精确率",
+        "布里尔分数",
+        "对数损失",
+    }
+
+    paths = save_baseline_reports(
+        model,
+        pd.DataFrame({"训练集回代诊断": metrics}).T,
+        model.unknown_bin_report(X.iloc[:50]),
+        tmp_path,
+    )
+    for path in paths.values():
+        assert path.exists() and path.stat().st_size > 0
