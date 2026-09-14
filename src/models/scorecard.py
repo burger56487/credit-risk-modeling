@@ -27,6 +27,7 @@ import pandas as pd
 from scipy.special import expit
 from sklearn.utils.validation import check_is_fitted
 
+from src.features.engineering import build_business_features
 from src.models.logistic import RiskLogisticModel
 
 
@@ -280,3 +281,41 @@ class LogisticScorecard:
         report = self._model.unknown_bin_report(X).copy()
         report["is_selected"] = report.index.isin(self._coefficients.index)
         return report
+
+    def input_diagnostics(self, X: pd.DataFrame) -> pd.DataFrame:
+        """Per-application data and unknown-bin diagnostics.
+
+        These flags never change the prediction or the policy outcome. They
+        cover raw field quality as well, including fields that the final model
+        did not select, and they are data-coverage signals rather than a
+        statement about the applicant.
+        """
+        features = build_business_features(X)
+        bins = self._model.binner_.transform(features)
+        selected = self._model.selected_features_
+
+        unknown = pd.DataFrame(
+            {
+                col: ~bins[col].isin(self._model.encoder_.mapping_[col])
+                for col in selected
+            },
+            index=features.index,
+        )
+
+        flag_columns = [
+            col
+            for col in features.columns
+            if col.endswith(("_missing", "_invalid", "_sentinel"))
+        ]
+
+        out = pd.DataFrame(index=features.index)
+        out["unknown_selected_bins"] = unknown.sum(axis=1).astype("int64")
+
+        out["input_review_required"] = (
+            features[flag_columns].gt(0).any(axis=1)
+            | features["income_zero"].gt(0)
+            | features["employment_age_inconsistent"].gt(0)
+            | out["unknown_selected_bins"].gt(0)
+        )
+
+        return out

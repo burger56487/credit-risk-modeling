@@ -10,13 +10,14 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Steps 1–14 complete** (data layer, database feature layer, leakage-safe splitting,
+**Steps 1–15 complete** (data layer, database feature layer, leakage-safe splitting,
 cleaning decisions, business features, train-only binning and WOE/IV encoding, the
 end-to-end logistic-regression baseline, the gradient-boosting comparison, the
 scorecard scaling with per-variable decomposition, the paired resampling comparison
 of the two pipelines, the calibration and distribution-stability diagnostics, the
 internal explanation and reason-code prototype, the offline approval-threshold
-policy simulation, and the batch monitoring loop with append-only run records).
+policy simulation, the batch monitoring loop with append-only run records, and the
+packaged serving artefact with a strict scoring API).
 
 Roadmap:
 
@@ -36,7 +37,8 @@ Roadmap:
 | 12 | Model explanation and reason-code prototype | Done |
 | 13 | Approval threshold and business-policy offline simulation | Done |
 | 14 | Monitoring dashboard, alert rules and run records | Done |
-| 15 | Model artefact packaging, version consistency and a prediction service | Planned |
+| 15 | Model artefact packaging, version consistency and a prediction service | Done |
+| 16 | Project-level acceptance review, CI consolidation and honest gap list | Planned |
 
 ## Dataset
 
@@ -78,6 +80,8 @@ credit-risk-modeling/
   src/explain/local.py             # Step 12: local attribution + reason codes
   src/strategy/approval.py         # Step 13: threshold policy + scenario utility
   src/monitoring/runner.py         # Step 14: batch monitor + run records
+  src/serving/artifact.py          # Step 15: bundle export, digest verification
+  src/serving/api.py               # Step 15: strict scoring API
   sql/01_create_tables.sql         # Step 2: raw table DDL
   sql/02_aggregate_bureau.sql      # Step 2: bureau -> one row per customer
   sql/03_build_model_table.sql     # Step 2: LEFT JOIN into the modelling table
@@ -102,6 +106,8 @@ credit-risk-modeling/
   tests/test_policy_runner.py          # Step 13 runner end to end
   tests/test_monitoring.py             # batch guards, notices, append-only store
   tests/test_monitoring_runner.py      # Step 14 runner and dashboard parse check
+  tests/test_serving.py                # artefact checks, strict input, online==offline
+  tests/test_release_runner.py         # Step 15 export/load round trip
   tests/conftest.py                # synthetic modelling table shared by runners
   scripts/run_step_08_comparison.py  # one shared split: logistic vs boosting
   scripts/run_step_09_scorecard.py   # score scale, decomposition and audit
@@ -110,6 +116,7 @@ credit-risk-modeling/
   scripts/run_step_12_explanations.py    # aggregate explanation audit only
   scripts/run_step_13_policy_simulation.py  # threshold curves and cost sensitivity
   scripts/run_step_14_monitoring.py         # batch runs into the record store
+  scripts/run_step_15_release.py            # export the bundle and self-check it
   apps/monitoring_dashboard.py              # read-only local Streamlit view
   data/data_dictionary.md          # field-level business meaning (Step 1 output)
   docker-compose.yml               # local PostgreSQL
@@ -925,6 +932,87 @@ rendered page has not been visually verified here. There is no authentication,
 authorisation or network hardening: do not expose it publicly and do not point it
 at real customer records.
 
+## Step 15: packaged artefact and scoring service
+
+```bash
+python -m pip install -r requirements.txt
+
+# export a release, then reload it with the digest it just produced
+python scripts/run_step_15_release.py \
+  --model-table data/processed/model_table.csv \
+  --release 研究包第一版 --threshold 0.08
+
+# later, start the service against that release
+export RISK_ARTIFACT_DIR=artifacts/releases/研究包第一版
+export RISK_MANIFEST_SHA256=<the printed manifest digest>
+export RISK_API_TOKEN=<generated locally, never committed>
+python -m uvicorn src.serving.api:app_from_environment --factory \
+  --host 127.0.0.1 --port 8000 --workers 1 --no-access-log
+```
+
+One release directory holds `bundle.joblib` and `manifest.json`. The bundle is
+the scorecard — which already owns the fitted logistic snapshot and the score
+scale — plus the frozen policy, so the probability, the score and the simulated
+decision cannot come from three different versions. The tree pipeline stays an
+offline comparison for now; the first service exposes one scoring branch.
+
+**Verification chain at load time** (all before deserialisation):
+
+| Step | Check |
+|---|---|
+| 1 | manifest digest matches the digest supplied by the deployment config |
+| 2 | manifest schema and artefact file name are supported |
+| 3 | runtime library versions and the project source digest match the export |
+| 4 | model bytes match the digest recorded in the manifest |
+| 5 | only then are the **already-verified** in-memory bytes deserialised |
+| 6 | bundle type, release fields and internal release metadata are validated |
+| 7 | the fixed canary rows reproduce the exported outputs |
+
+The same bytes that passed step 4 are the bytes restored in step 5; the path is
+not reopened, so the file cannot change in between. A tampered manifest or a
+tampered bundle is rejected before any deserialisation happens (asserted in the
+tests by forbidding `joblib.load`).
+
+**What this does and does not prove.** A digest proves content, not publisher
+identity, and the canary re-check proves delivery consistency, not model quality,
+robustness to every input, or the absence of malicious code. Loading a trusted,
+internally exported artefact remains a precondition, and there is no upload
+endpoint or user-specified model path. Because the pipeline uses custom
+preprocessing classes, the package stores object state rather than frozen program
+behaviour — so **any later change to `src/` invalidates older packages** and they
+must be re-tested and re-released rather than force-loaded.
+
+**API boundaries**
+
+- Only the ten predefined numeric application fields are accepted; missing values
+  must be sent explicitly, and labels, extra fields, string numbers and booleans
+  are rejected.
+- Duplicate application ids inside one request are rejected; the batch is capped
+  at 100 applications and the request body at 64 KiB, checked before parsing.
+- Validation errors never echo the submitted field values back.
+- A researcher token is required; without it the request is rejected.
+- An artefact with no policy returns `simulated_approval = null` rather than
+  inventing an approve/reject outcome, and review flags never quietly override
+  the policy result.
+- Every response is labelled `研究仿真，非真实授信决定`, and the decision uses the
+  raw probability, never the rounded display score.
+
+**Demo run** (synthetic table, threshold 0.08, ~4 seconds including an in-process
+request):
+
+| Check | Result |
+|---|---|
+| Exported files | `bundle.joblib`, `manifest.json` |
+| Manifest digest | `71c4177…b7b6e2` (printed for the deployment config) |
+| Offline vs reloaded canary output | max absolute difference `0.0` over 3 rows |
+| `/health` | 200 |
+| `/v1/score` | 200, `研究仿真，非真实授信决定` |
+| API vs offline probability | absolute difference `0.0` |
+| Response echoing raw fields | `False` |
+
+The release script also refuses to overwrite an existing release directory:
+producing a new release requires a new name.
+
 ## Current limitations (kept explicit)
 
 - The Home Credit split in this repository is a stratified random holdout, **not**
@@ -1020,6 +1108,15 @@ at real customer records.
 - Supervised monitoring still uses the development validation split that has been
   inspected repeatedly, and the project has no fairness assessment, business
   policy sign-off or compliance approval.
+- The Step 15 service is a local research prototype: no dependency lock file or
+  container image, no rate limiting, concurrency control, TLS or token rotation,
+  no independent artefact signing or release approval, no request audit log, and
+  no load, failover or long-running stability testing.
+- Version strings inside the bundle are still human-entered names plus digests of
+  the model bytes and source tree; they are not an externally signed provenance
+  chain.
+- The database ingestion TODOs from Step 2 are still open, and the final holdout
+  evaluation has not been run now that the development choices are frozen.
 
 ## Reproducibility
 
