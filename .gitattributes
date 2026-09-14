@@ -1,0 +1,9 @@
+# Keep line endings stable: the artefact check hashes source bytes, so a
+# checkout that rewrites endings would otherwise look like a code change.
+*.py text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+*.md text eol=lf
+*.sql text eol=lf
+*.txt text eol=lf

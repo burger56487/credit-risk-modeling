@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--points-to-double-odds", type=float, default=20.0)
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--valid-size", type=float, default=0.2)
-    parser.add_argument("--oot-size", type=float, default=0.2)
+    parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument(
         "--skip-self-request",
         action="store_true",
@@ -81,7 +81,7 @@ def main(argv: list[str] | None = None) -> None:
         model_table,
         random_state=arguments.random_state,
         valid_size=arguments.valid_size,
-        oot_size=arguments.oot_size,
+        test_size=arguments.test_size,
     )
     check_split_ids(split)
 

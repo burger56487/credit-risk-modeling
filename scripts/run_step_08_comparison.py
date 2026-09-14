@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--valid-size", type=float, default=0.2)
-    parser.add_argument("--oot-size", type=float, default=0.2)
+    parser.add_argument("--test-size", type=float, default=0.2)
     arguments = parser.parse_args(argv)
 
     model_table = load_model_table(arguments.model_table)
@@ -53,7 +53,7 @@ def main(argv: list[str] | None = None) -> None:
         model_table,
         random_state=arguments.random_state,
         valid_size=arguments.valid_size,
-        oot_size=arguments.oot_size,
+        test_size=arguments.test_size,
     )
     check_split_ids(split)
 
@@ -123,8 +123,8 @@ def main(argv: list[str] | None = None) -> None:
         "实验说明": "同一随机划分下的两条建模流程对照",
         "是否使用最终测试集": False,
         "是否使用验证集提前停止": False,
-        "划分方式": split.meta["mode"],
-        "划分说明": split.meta["limitation"],
+        "划分方式": "分层随机留出（非时间外）",
+        "划分说明": "数据没有可靠的申请时间，因此这是分层随机留出，不是时间外验证。",
         "逻辑回归配置": logistic_model.get_params(deep=False),
         "梯度提升树配置": boosting_model.get_params(deep=False),
         "训练样本数": boosting_model.training_samples_,

@@ -1,34 +1,63 @@
-name: CI
+name: 研究项目自动验收
 
 on:
   push:
-    branches: ["main"]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
-  tests:
+  acceptance:
+    name: 语法、静态检查、测试与覆盖率
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        python-version: ["3.11"]
+    timeout-minutes: 20
 
     steps:
-      - uses: actions/checkout@v4
+      - name: 获取代码
+        uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: 配置解释器
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: "3.11"
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
+      - name: 配置环境工具
+        uses: astral-sh/setup-uv@v5
 
-      - name: Run tests
-        run: python -m pytest -q
+      - name: 检查锁文件已提交
+        run: git ls-files --error-unmatch uv.lock
+
+      - name: 按锁文件安装依赖
+        run: uv sync --frozen --all-extras
+
+      - name: 检查语法
+        run: uv run --frozen python -m compileall -q src apps
+
+      - name: 基础静态错误检查
+        run: uv run --frozen ruff check src apps tests
+
+      - name: 运行全部测试与覆盖率门槛
+        run: >
+          uv run --frozen python -m pytest
+          --cov=src
+          --cov-branch
+          --cov-report=term-missing
+          --cov-report=xml:reports/coverage.xml
+          --junitxml=reports/test-results.xml
+
+      - name: 保存验收报告
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: 自动验收报告
+          path: |
+            reports/coverage.xml
+            reports/test-results.xml
+          if-no-files-found: warn
 
   sql:
+    name: PostgreSQL 脚本校验
     runs-on: ubuntu-latest
 
     services:
@@ -47,9 +76,10 @@ jobs:
           --health-retries 5
 
     steps:
-      - uses: actions/checkout@v4
+      - name: 获取代码
+        uses: actions/checkout@v4
 
-      - name: Validate the SQL scripts against PostgreSQL
+      - name: 在 PostgreSQL 上验证建表与聚合脚本
         env:
           PGPASSWORD: creditrisk
         run: |

@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--valid-size", type=float, default=0.2)
-    parser.add_argument("--oot-size", type=float, default=0.2)
+    parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--n-bins", type=int, default=10)
     parser.add_argument("--psi-bins", type=int, default=5)
     parser.add_argument("--epsilon", type=float, default=1e-6)
@@ -76,7 +76,7 @@ def main(argv: list[str] | None = None) -> None:
         model_table,
         random_state=arguments.random_state,
         valid_size=arguments.valid_size,
-        oot_size=arguments.oot_size,
+        test_size=arguments.test_size,
     )
     check_split_ids(split)
 
@@ -196,8 +196,8 @@ def main(argv: list[str] | None = None) -> None:
             "公开标签不等同于已验证的固定期限监管违约定义。",
             "输入分布可较早监控，但概率校准与效果评估需要等表现标签成熟。",
         ],
-        "划分方式": split.meta["mode"],
-        "留出说明": split.meta["limitation"],
+        "划分方式": "分层随机留出（非时间外）",
+        "留出说明": "数据没有可靠的申请时间，因此这是分层随机留出，不是时间外验证。",
         "封存测试样本数": len(split.y_test),
         "输入数据": {
             "文件": arguments.model_table.name,

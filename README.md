@@ -10,14 +10,10 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Steps 1–15 complete** (data layer, database feature layer, leakage-safe splitting,
-cleaning decisions, business features, train-only binning and WOE/IV encoding, the
-end-to-end logistic-regression baseline, the gradient-boosting comparison, the
-scorecard scaling with per-variable decomposition, the paired resampling comparison
-of the two pipelines, the calibration and distribution-stability diagnostics, the
-internal explanation and reason-code prototype, the offline approval-threshold
-policy simulation, the batch monitoring loop with append-only run records, and the
-packaged serving artefact with a strict scoring API).
+**Steps 1–16 delivered as a research prototype.** Read the completion table below
+before quoting anything from this repository: the modelling, validation, monitoring
+and serving modules exist and are tested, while the raw database pipeline is not
+accepted and the final holdout has not been evaluated.
 
 Roadmap:
 
@@ -38,7 +34,36 @@ Roadmap:
 | 13 | Approval threshold and business-policy offline simulation | Done |
 | 14 | Monitoring dashboard, alert rules and run records | Done |
 | 15 | Model artefact packaging, version consistency and a prediction service | Done |
-| 16 | Project-level acceptance review, CI consolidation and honest gap list | Planned |
+| 16 | Project-level acceptance review, CI consolidation and honest gap list | Done |
+
+## What is and is not finished
+
+| Capability | Honest description |
+|---|---|
+| Business features, binning, WOE/IV | Implemented and unit-tested; waiting for a real-data run |
+| Logistic and tree comparison | Training and validation pipelines exist; real metrics still have to be produced by running them |
+| Scorecard and explanation reconstruction | Numerical identity tests exist (probability, points and decomposition agree) |
+| Policy simulation and cost sensitivity | Offline study on public labels with assumed utilities |
+| Batch monitoring and local dashboard | Research prototype; it never takes a business action and the dashboard page was not visually verified |
+| Artefact and scoring API | Verified loading and online/offline consistency; not a production security certification |
+| Continuous integration | Added in Step 16; whether it passes is decided by the actual workflow run |
+| Raw database full chain | **Not accepted** — the Step 2 ingestion TODOs are still open |
+| Final holdout evaluation | **Not performed** |
+| Real business use and benefit | **Not started** and must not be claimed |
+
+The same rule applies to how this project is described. Until the real runs exist,
+do not write "300+ tests all pass", "86% coverage", "improved approval efficiency by
+X", "reduced bad debt by Y" or "production-grade full-lifecycle platform". What can
+be said truthfully is:
+
+> Credit risk modelling and validation research platform: business features, a
+> scorecard and a gradient-boosting comparison, paired resampling, calibration and
+> drift diagnostics, and a fixed-policy scenario simulation; the offline model is
+> connected to a research scoring service through artefact digest verification and
+> online/offline consistency tests, with results and data limitations traceable.
+
+Test counts, coverage numbers and model metrics belong in the sentence only once
+they come from an actual run.
 
 ## Dataset
 
@@ -121,19 +146,34 @@ credit-risk-modeling/
   data/data_dictionary.md          # field-level business meaning (Step 1 output)
   docker-compose.yml               # local PostgreSQL
   .github/workflows/ci.yml         # CI: pytest + PostgreSQL SQL validation
+  pyproject.toml                   # project metadata, tooling and coverage gate
+  uv.lock                          # pinned dependency set used by CI
+  .gitattributes                   # stable LF endings (source digests hash bytes)
+  tests/test_system_acceptance.py  # Step 16 end-to-end acceptance test
 ```
 
 ## How to run
 
 ```bash
-python -m pip install -r requirements.txt
+# reproducible environment from the lock file (recommended)
+python -m pip install uv
+uv sync --frozen --all-extras
+
+# or, without uv: pip install -r requirements.txt
 
 # place the Kaggle CSVs in data/raw/ first
-python -m src.data_layer.load_raw
+uv run --frozen python -m src.data_layer.load_raw
 
 # run the tests
-pytest -q
+uv run --frozen python -m pytest -q
 ```
+
+`pyproject.toml` defines the allowed version ranges and `uv.lock` pins the exact
+resolved set; `requirements.txt` is only a convenience mirror for pip users, so the
+lock file is the authoritative one. The version ranges were widened from the
+original suggestion (`scikit-learn<1.6`, `pandas<3`) because those narrower pins
+were never verified in this environment: the lock records the versions that actually
+pass the suite here.
 
 ## Step 2: PostgreSQL feature layer
 
@@ -170,27 +210,31 @@ modelling layer.
 ## Step 3: splitting and leakage discipline
 
 ```python
-from src.data_layer.split_data import stratified_split, temporal_split
+from src.data_layer.split_data import stratified_split
 
-split = stratified_split(df)          # Home Credit: no timestamp available
-print(split.summary())                # sizes and bad rates per split
-
-split = temporal_split(df, time_col="issue_d")   # timestamped data
-print(split.meta["time_ranges"])      # auditable time boundaries
+split = stratified_split(df, valid_size=0.2, test_size=0.2, random_state=42)
+print(split.membership().head())      # application id -> partition
 ```
 
-**Why out-of-time (OOT) validation matters.** A credit model is applied to
-future applicants, so a random split can overstate performance: the training set
-may contain information that is contemporaneous with (or later than) the test
-period. The standard three-way split is `train` (fit parameters) | `valid`
-(tuning and cut-off selection) | `test` (opened once, at final evaluation).
+**Accurate wording (important).** The Home Credit main table has **no reliable
+application timestamp**, so this project uses a *stratified random holdout* and
+never describes it as an out-of-time test. An earlier version of this module also
+exposed a `temporal_split`; it was removed rather than maintained, because a
+time-based split cannot be validated on data without a trustworthy timestamp and
+an observation window.
 
-**Accurate wording (important).** The Home Credit main table has **no application
-timestamp**, so the split used here is a *stratified random holdout* — it is
-**not** a true out-of-time test and this project does not describe it as one.
-`DataSplit.meta["mode"]` records `stratified_holdout` for that case. The module
-also implements `temporal_split`, a genuine OOT split for datasets that do have a
-timestamp (for example LendingClub's `issue_d`), recorded as `temporal_oot`.
+**What the revised splitter guarantees** (Step 16 replaced the old one):
+
+- application ids must be unique, integer and never missing;
+- rows are sorted by id before splitting, so the same input gives the same
+  partition whatever order it arrives in — membership is reproducible, not just
+  "the same seed";
+- the index of every split is the application id, so `X` and `y` line up by
+  construction and `membership()` can record who went where without labels;
+- the three partitions are checked pairwise-disjoint and jointly complete, rather
+  than only checking that the row count adds up;
+- unique ids still do not prove that applicants are independent; a real customer
+  identifier would need grouped splitting.
 
 **Leakage rules enforced in this project**
 
@@ -1003,7 +1047,7 @@ request):
 | Check | Result |
 |---|---|
 | Exported files | `bundle.joblib`, `manifest.json` |
-| Manifest digest | `71c4177…b7b6e2` (printed for the deployment config) |
+| Manifest digest | `74ff952…45bd9c` for `演示包第二版` (printed for the deployment config) |
 | Offline vs reloaded canary output | max absolute difference `0.0` over 3 rows |
 | `/health` | 200 |
 | `/v1/score` | 200, `研究仿真，非真实授信决定` |
@@ -1011,12 +1055,70 @@ request):
 | Response echoing raw fields | `False` |
 
 The release script also refuses to overwrite an existing release directory:
-producing a new release requires a new name.
+producing a new release requires a new name. Step 16 widened the environment
+fingerprint (adding fastapi, starlette, pydantic, uvicorn), and the earlier
+`演示包` package is now refused with `运行环境或项目源码版本不匹配` — which is the
+intended behaviour, not a bug: test again, then release again.
+
+## Step 16: acceptance, continuous integration and delivery review
+
+```bash
+uv run --frozen python -m compileall -q src apps     # import and syntax errors
+uv run --frozen ruff check src apps tests           # basic static errors
+uv run --frozen python -m pytest \
+  --cov=src --cov-branch --cov-report=term-missing \
+  --cov-report=xml:reports/coverage.xml --junitxml=reports/test-results.xml
+```
+
+Acceptance order is deliberate: syntax, then unit failures, then integration
+failures, then the coverage gate, and only then runtime and performance. There is no
+point discovering an interface bug on 300k rows when six artificial rows would have
+found it.
+
+**Four cross-step problems were fixed in this step**
+
+| Problem | Fix |
+|---|---|
+| The splitter produced a random holdout but named it out-of-time, and its id check was nominal | Splitter replaced; membership is id-based, reproducible and explicitly disjoint/complete |
+| The release fingerprint ignored the API framework, so the same bundle could run under different input-validation code | `_environment()` now also records fastapi, starlette, pydantic and uvicorn |
+| Each module had its own tests but nothing proved the chain connects | `tests/test_system_acceptance.py` runs split → training → policy → scorecard → artefact → API |
+| No lock file or unified configuration | `pyproject.toml` plus a committed `uv.lock`, with the CI installing `--frozen` |
+
+**Local acceptance results** (Windows, Python 3.12, lock environment):
+
+| Check | Result |
+|---|---|
+| `uv lock` | resolved 73 packages |
+| `uv sync --frozen --all-extras` | installed, including the dashboard extra |
+| `compileall -q src apps` | exit 0 |
+| `ruff check src apps tests` | all checks passed |
+| `pytest` (no coverage) | 281 passed |
+| `pytest --cov --cov-branch` | 281 passed, branch coverage **86.96%**, gate 80% reached |
+| Acceptance test | offline probability, score and decision all reproduce through the API |
+
+The automated workflow adds linting and the coverage gate but deliberately does
+**not** download the real data, read the final test split, pick models or thresholds,
+publish artefacts, upload models/tokens/per-row predictions, or retrain on merge. It
+also keeps the PostgreSQL script-validation job alongside the new acceptance job.
+
+**Two blockers remain, and they are recorded rather than papered over**
+
+1. The Step 2 raw database chain still needs: DDL matching the import columns, a
+   transactional load instead of per-chunk commits after truncation, table names
+   from a fixed allow-list, a safe strategy for very wide tables, real feature-table
+   refreshes rather than "skip if present", and reconciliation of row counts, keys
+   and duplicate joins against the target database engine.
+2. The final holdout split has not been evaluated under a frozen protocol. Before it
+   is opened, the data contract, partition membership, preprocessing, model,
+   probability definition, scale, policy and evaluation method all have to be frozen
+   — and once a result has been seen, changing variables or thresholds means it is no
+   longer an independent final evaluation.
 
 ## Current limitations (kept explicit)
 
 - The Home Credit split in this repository is a stratified random holdout, **not**
-  a true out-of-time test; only `temporal_split` provides OOT.
+  a true out-of-time test, and no time-based splitter is offered until a reliable
+  application timestamp and observation window exist.
 - `TARGET` is payment difficulty under the dataset's own definition, not a
   confirmed "90+ days past due" label.
 - `DAYS_EMPLOYED = 365243` is treated as a special code, not as evidence of

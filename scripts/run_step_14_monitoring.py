@@ -63,7 +63,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--batch-id", default="随机验证批次一")
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--valid-size", type=float, default=0.2)
-    parser.add_argument("--oot-size", type=float, default=0.2)
+    parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--min-batch-size", type=int, default=200)
     arguments = parser.parse_args(argv)
 
@@ -72,7 +72,7 @@ def main(argv: list[str] | None = None) -> None:
         model_table,
         random_state=arguments.random_state,
         valid_size=arguments.valid_size,
-        oot_size=arguments.oot_size,
+        test_size=arguments.test_size,
     )
     check_split_ids(split)
 

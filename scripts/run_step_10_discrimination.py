@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--random-state", type=int, default=42)
     parser.add_argument("--valid-size", type=float, default=0.2)
-    parser.add_argument("--oot-size", type=float, default=0.2)
+    parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--n-bootstrap", type=int, default=2000)
     parser.add_argument("--confidence-level", type=float, default=0.95)
     arguments = parser.parse_args(argv)
@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> None:
         model_table,
         random_state=arguments.random_state,
         valid_size=arguments.valid_size,
-        oot_size=arguments.oot_size,
+        test_size=arguments.test_size,
     )
     check_split_ids(split)
 
@@ -102,8 +102,8 @@ def main(argv: list[str] | None = None) -> None:
         "是否包含重新训练的不确定性": False,
         "是否处理反复查看验证集的选择偏差": False,
         "多指标说明": "分别报告边际区间，不提供联合覆盖保证",
-        "划分方式": split.meta["mode"],
-        "留出说明": split.meta["limitation"],
+        "划分方式": "分层随机留出（非时间外）",
+        "留出说明": "数据没有可靠的申请时间，因此这是分层随机留出，不是时间外验证。",
         "封存测试样本数": len(split.y_test),
         "输入数据": {
             "文件": arguments.model_table.name,

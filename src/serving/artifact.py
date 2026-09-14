@@ -162,6 +162,10 @@ def _environment() -> dict:
         "科学计算": version("scipy"),
         "机器学习": version("scikit-learn"),
         "序列化": version("joblib"),
+        "接口框架": version("fastapi"),
+        "接口基础框架": version("starlette"),
+        "输入校验": version("pydantic"),
+        "服务启动器": version("uvicorn"),
     }
 
 

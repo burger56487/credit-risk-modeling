@@ -1,86 +1,59 @@
-"""Step 3: data splitting into train / validation / test sets.
+"""Stratified random train/valid/test splitting; no out-of-time claim.
 
-Two modes are supported:
+This module deliberately offers only a stratified random holdout. An earlier
+version also exposed a "temporal" split, but this dataset has no reliable
+application timestamp, so a time-based split could not be validated and the
+interface was removed rather than maintained as an unverified capability.
 
-* ``stratified`` — stratified random holdout, for datasets without an
-  application timestamp (Home Credit). This is **not** an out-of-time test and
-  is not described as one.
-* ``temporal`` — true out-of-time split, for datasets with a timestamp
-  (e.g. LendingClub ``issue_d``). Past data trains, the most recent data tests.
+Membership is decided on the application id, not on row position:
 
-The stratified splitter uses ``numpy`` only, so the data layer keeps a light
-dependency footprint; it reproduces the class ratios of
-``sklearn.model_selection.train_test_split(..., stratify=y)``.
+* ids must be unique, integer and never missing;
+* rows are sorted by id before splitting, so the same input gives the same
+  partition regardless of the order it arrives in;
+* the split index is the application id;
+* the three partitions are checked to be pairwise disjoint and jointly complete.
 
-Core discipline: the OOT set is only opened once, at final evaluation. All
-tuning, feature selection and threshold choice must use train/validation only.
+Unique application ids still do not prove that applicants are independent; a
+future customer identifier would need grouped splitting.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from numbers import Integral, Real
 
 import numpy as np
 import pandas as pd
+from pandas.api.types import is_bool_dtype, is_integer_dtype
+from sklearn.model_selection import train_test_split
 
 
-@dataclass
+@dataclass(frozen=True)
 class DataSplit:
-    """Container for the three splits, so they cannot be passed around mixed up.
-
-    ``meta`` records auditable facts about the split (for example the time
-    boundaries of a temporal split) without leaking them into the features.
-    """
-
     X_train: pd.DataFrame
     X_valid: pd.DataFrame
     X_test: pd.DataFrame
+
     y_train: pd.Series
     y_valid: pd.Series
     y_test: pd.Series
-    meta: dict = field(default_factory=dict)
 
-    def summary(self) -> pd.DataFrame:
-        """Size and bad rate of each split, for sanity checks."""
+    def membership(self) -> pd.DataFrame:
+        """Return application-to-partition membership, without labels."""
         rows = []
-        for name, y in [
-            ("train", self.y_train),
-            ("valid", self.y_valid),
-            ("test", self.y_test),
-        ]:
-            rows.append({
-                "dataset": name,
-                "n_samples": len(y),
-                "bad_rate": round(float(y.mean()), 4),
-            })
-        return pd.DataFrame(rows)
 
+        for name, frame in (
+            ("训练", self.X_train),
+            ("验证", self.X_valid),
+            ("测试", self.X_test),
+        ):
+            rows.extend(
+                {"application_id": int(identifier), "partition": name}
+                for identifier in frame.index
+            )
 
-def _stratified_take(y: np.ndarray, size: float,
-                     rng: np.random.Generator) -> tuple[np.ndarray, np.ndarray]:
-    """Split indices into (taken, kept) while preserving class ratios.
-
-    A class with fewer than two members is always kept, so that rare classes do
-    not create empty splits.
-    """
-    taken: list[np.ndarray] = []
-    kept: list[np.ndarray] = []
-
-    for cls in np.unique(y):
-        idx = np.flatnonzero(y == cls)
-        rng.shuffle(idx)
-        if len(idx) < 2:
-            kept.append(idx)
-            continue
-        n_take = int(round(size * len(idx)))
-        n_take = min(max(n_take, 1), len(idx) - 1)
-        taken.append(idx[:n_take])
-        kept.append(idx[n_take:])
-
-    taken_idx = (np.concatenate(taken) if taken
-                 else np.array([], dtype=int))
-    kept_idx = (np.concatenate(kept) if kept
-                else np.array([], dtype=int))
-    rng.shuffle(taken_idx)
-    rng.shuffle(kept_idx)
-    return taken_idx, kept_idx
+        return (
+            pd.DataFrame(rows)
+            .sort_values("application_id")
+            .reset_index(drop=True)
+        )
 
 
 def stratified_split(
@@ -88,107 +61,118 @@ def stratified_split(
     target_col: str = "target",
     id_col: str = "sk_id_curr",
     valid_size: float = 0.2,
-    oot_size: float = 0.2,
+    test_size: float = 0.2,
     random_state: int = 42,
 ) -> DataSplit:
-    """Stratified random split (Home Credit mode).
+    """Stratified random split whose membership does not depend on row order."""
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        raise ValueError("划分输入必须是非空数据表。")
+    if not df.columns.is_unique:
+        raise ValueError("输入字段名不能重复。")
+    if target_col == id_col:
+        raise ValueError("标签列与申请编号列不能相同。")
 
-    The OOT set is cut first, then the validation set is cut from what remains,
-    so each split keeps the overall bad rate.
+    missing = {target_col, id_col} - set(df.columns)
+    if missing:
+        raise ValueError(f"缺少划分字段：{sorted(missing)}")
 
-    The ID column is kept in ``X`` for traceability; it must be dropped before
-    model training (see Step 7).
-    """
-    if valid_size + oot_size >= 1.0:
-        raise ValueError("valid_size + oot_size must be below 1.0")
-    if target_col not in df.columns:
-        raise KeyError(f"target column not found: {target_col}")
+    for name, value in (
+        ("验证集比例", valid_size),
+        ("测试集比例", test_size),
+    ):
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, Real)
+            or not np.isfinite(value)
+            or not 0 < value < 1
+        ):
+            raise ValueError(f"{name}必须严格位于零与一之间。")
 
-    rng = np.random.default_rng(random_state)
-    y_all = df[target_col].to_numpy()
+    if valid_size + test_size >= 1:
+        raise ValueError("训练集必须保留正比例样本。")
 
-    test_idx, rest_idx = _stratified_take(y_all, oot_size, rng)
+    if (
+        isinstance(random_state, bool)
+        or not isinstance(random_state, Integral)
+        or not 0 <= random_state < 2**32
+    ):
+        raise ValueError("随机种子必须是规定范围内的非负整数。")
 
-    # valid_size is stated relative to the full dataset, so rescale it to the
-    # remaining data after OOT has been removed.
-    valid_ratio_in_rest = valid_size / (1.0 - oot_size)
-    valid_rel, train_rel = _stratified_take(y_all[rest_idx],
-                                            valid_ratio_in_rest, rng)
-    train_idx, valid_idx = rest_idx[train_rel], rest_idx[valid_rel]
+    identifiers = df[id_col]
 
-    feature_cols = [c for c in df.columns if c != target_col]
-    X = df[feature_cols]
-    y = df[target_col]
+    if identifiers.isna().any() or identifiers.duplicated().any():
+        raise ValueError("申请编号不能缺失或重复。")
+    if (
+        is_bool_dtype(identifiers.dtype)
+        or not is_integer_dtype(identifiers.dtype)
+    ):
+        raise ValueError("本数据契约要求申请编号使用整数类型。")
 
-    return DataSplit(
-        X_train=X.iloc[train_idx], X_valid=X.iloc[valid_idx],
-        X_test=X.iloc[test_idx],
-        y_train=y.iloc[train_idx], y_valid=y.iloc[valid_idx],
-        y_test=y.iloc[test_idx],
-        meta={
-            "mode": "stratified_holdout",
-            "id_col": id_col,
-            "random_state": random_state,
-            "limitation": (
-                "Home Credit has no application timestamp, so this is a "
-                "stratified random holdout, not an out-of-time test."
-            ),
-        },
+    target = df[target_col]
+    if target.isna().any() or not target.isin([0, 1]).all():
+        raise ValueError("标签必须是没有缺失的零或一。")
+    if target.nunique() != 2:
+        raise ValueError("分层划分需要同时存在两类标签。")
+
+    # The input is never modified: order by id and use the id as the index.
+    ordered = (
+        df.sort_values(id_col, kind="stable")
+        .set_index(id_col, drop=False)
+        .copy()
     )
 
+    try:
+        remaining, test = train_test_split(
+            ordered,
+            test_size=float(test_size),
+            stratify=ordered[target_col],
+            random_state=int(random_state),
+        )
 
-def temporal_split(
-    df: pd.DataFrame,
-    time_col: str,
-    target_col: str = "target",
-    valid_size: float = 0.2,
-    oot_size: float = 0.2,
-    verbose: bool = True,
-) -> DataSplit:
-    """Out-of-time split: earliest data trains, latest data is the OOT test.
+        train, valid = train_test_split(
+            remaining,
+            test_size=float(valid_size) / (1.0 - float(test_size)),
+            stratify=remaining[target_col],
+            random_state=int(random_state),
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "当前样本数量、类别数量与比例无法完成分层划分。"
+        ) from exc
 
-    The time boundaries are recorded in ``meta['time_ranges']`` and the split
-    asserts that no time travel occurs (train max <= OOT min).
-    """
-    if valid_size + oot_size >= 1.0:
-        raise ValueError("valid_size + oot_size must be below 1.0")
-    for col in (time_col, target_col):
-        if col not in df.columns:
-            raise KeyError(f"column not found: {col}")
+    partitions = [
+        frame.sort_index().copy() for frame in (train, valid, test)
+    ]
 
-    df_sorted = df.sort_values(time_col).reset_index(drop=True)
-    n = len(df_sorted)
-    train_end = int(n * (1.0 - valid_size - oot_size))
-    valid_end = int(n * (1.0 - oot_size))
+    if any(
+        frame.empty or frame[target_col].nunique() != 2
+        for frame in partitions
+    ):
+        raise ValueError("划分后每个集合都必须同时包含两类样本。")
 
-    train_df = df_sorted.iloc[:train_end]
-    valid_df = df_sorted.iloc[train_end:valid_end]
-    oot_df = df_sorted.iloc[valid_end:]
+    id_sets = [set(frame.index) for frame in partitions]
 
-    if len(train_df) == 0 or len(valid_df) == 0 or len(oot_df) == 0:
-        raise ValueError("split sizes must all be non-empty")
+    if any(
+        id_sets[left] & id_sets[right]
+        for left, right in ((0, 1), (0, 2), (1, 2))
+    ):
+        raise RuntimeError("划分结果存在重复申请。")
 
-    time_ranges = {
-        "train": (train_df[time_col].min(), train_df[time_col].max()),
-        "valid": (valid_df[time_col].min(), valid_df[time_col].max()),
-        "oot": (oot_df[time_col].min(), oot_df[time_col].max()),
-    }
+    if set.union(*id_sets) != set(ordered.index):
+        raise RuntimeError("划分结果没有完整覆盖输入申请。")
 
-    # No time travel: training data must be strictly in the past of the OOT set.
-    assert time_ranges["train"][1] <= time_ranges["oot"][0], "time travel detected"
+    feature_frames = [
+        frame.drop(columns=[target_col]).copy() for frame in partitions
+    ]
+    targets = [
+        frame[target_col].astype("int64").copy() for frame in partitions
+    ]
 
-    if verbose:
-        for name, (start, end) in time_ranges.items():
-            print(f"[时间划分] {name:5s}: {start} ~ {end}")
-
-    feature_cols = [c for c in df.columns if c not in (target_col, time_col)]
     return DataSplit(
-        X_train=train_df[feature_cols],
-        X_valid=valid_df[feature_cols],
-        X_test=oot_df[feature_cols],
-        y_train=train_df[target_col],
-        y_valid=valid_df[target_col],
-        y_test=oot_df[target_col],
-        meta={"mode": "temporal_oot", "time_col": time_col,
-              "time_ranges": time_ranges},
+        X_train=feature_frames[0],
+        X_valid=feature_frames[1],
+        X_test=feature_frames[2],
+        y_train=targets[0],
+        y_valid=targets[1],
+        y_test=targets[2],
     )

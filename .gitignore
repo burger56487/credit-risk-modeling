@@ -10,6 +10,24 @@ reports/
 # Local run records and artefacts
 artifacts/
 
+# Secrets (never commit tokens or local environment files)
+.env
+.env.*
+!.env.example
+
+# Model artefacts and local databases
+*.joblib
+*.sqlite3
+*.sqlite3-*
+
+# Coverage output (reports/ already ignores the report directory)
+.coverage
+.coverage.*
+htmlcov/
+
+# Alternate uv environment used for lock-file verification
+.venv-uv/
+
 # Python
 __pycache__/
 *.py[cod]

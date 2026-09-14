@@ -103,8 +103,9 @@ def test_stability_reports_have_expected_shape(step_11_output):
     predictions = pd.read_csv(
         out_dir / "prediction_stability_summary.csv", index_col=0
     )
-    assert list(predictions.index) == ["逻辑回归风险概率", "梯度提升树风险概率"]
-    # Reference and current samples are the same split, so drift must be small.
+    # Rows are ordered by drift, so only the membership is fixed.
+    assert set(predictions.index) == {"逻辑回归风险概率", "梯度提升树风险概率"}
+    # Reference and current come from the same split, so drift stays small.
     assert (predictions["稳定性指数"] < 0.05).all()
 
     prediction_bins = pd.read_csv(out_dir / "prediction_stability_bins.csv")

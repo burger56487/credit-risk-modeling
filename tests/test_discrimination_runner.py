@@ -117,6 +117,6 @@ def test_protocol_records_what_is_not_covered(step_10_output):
     assert protocol["是否处理反复查看验证集的选择偏差"] is False
     assert protocol["多指标说明"] == "分别报告边际区间，不提供联合覆盖保证"
     assert protocol["模型是否重新训练"] is False
-    assert protocol["划分方式"] == "stratified_holdout"
+    assert protocol["划分方式"] == "分层随机留出（非时间外）"
     assert protocol["输入数据"]["SHA256"]
     assert protocol["环境"]["梯度提升框架"]

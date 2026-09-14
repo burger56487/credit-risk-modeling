@@ -1,3 +1,60 @@
+[project]
+name = "credit-risk-research"
+version = "0.1.0"
+description = "信用风险建模、验证与服务化研究原型"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "numpy>=1.26,<3",
+    "pandas>=2.2,<4",
+    "scipy>=1.13,<2",
+    "scikit-learn>=1.5,<2",
+    "lightgbm>=4.5,<5",
+    "joblib>=1.4,<2",
+    "fastapi>=0.115,<1",
+    "pydantic>=2.8,<3",
+    "uvicorn>=0.30,<1",
+    "sqlalchemy>=2,<3",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+    "pytest-cov>=6,<7",
+    "httpx>=0.27,<1",
+    "ruff>=0.9,<1",
+]
+
+[project.optional-dependencies]
+dashboard = [
+    "streamlit>=1.41,<2",
+    "matplotlib>=3.9,<4",
+]
+postgres = [
+    "psycopg2-binary>=2.9,<3",
+]
+
+[tool.uv]
+package = false
+
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+markers = [
+    "integration: 跨模块集成测试，不依赖真实客户数据",
+]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E9", "F63", "F7", "F82"]
