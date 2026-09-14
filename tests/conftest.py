@@ -4,12 +4,21 @@ import pandas as pd
 import pytest
 
 
-def make_model_table(n: int = 900, seed: int = 5) -> pd.DataFrame:
-    """Build a frame with the raw columns the experiment runners require."""
+def make_model_table(
+    n: int = 900,
+    seed: int = 5,
+    separation: float = 1.0,
+) -> pd.DataFrame:
+    """Build a frame with the raw columns the experiment runners require.
+
+    ``separation`` scales the strength of the signal. A larger value gives a
+    cleaner low-risk segment, which the policy simulation needs to find a
+    feasible threshold under the default assumed costs.
+    """
     rng = np.random.default_rng(seed)
     score = rng.uniform(0.0, 1.0, size=n)
     leverage = rng.uniform(0.02, 0.5, size=n)
-    logit = 1.0 - 5.0 * score + 3.0 * leverage
+    logit = 1.0 - 5.0 * separation * score + 3.0 * separation * leverage
     target = (rng.uniform(size=n) < 1 / (1 + np.exp(-logit))).astype("int64")
 
     return pd.DataFrame(

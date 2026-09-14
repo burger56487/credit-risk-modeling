@@ -10,12 +10,13 @@ reported number can be reproduced from the raw data.
 
 ## Status
 
-**Steps 1–12 complete** (data layer, database feature layer, leakage-safe splitting,
+**Steps 1–13 complete** (data layer, database feature layer, leakage-safe splitting,
 cleaning decisions, business features, train-only binning and WOE/IV encoding, the
 end-to-end logistic-regression baseline, the gradient-boosting comparison, the
 scorecard scaling with per-variable decomposition, the paired resampling comparison
-of the two pipelines, the calibration and distribution-stability diagnostics, and the
-internal explanation and reason-code prototype).
+of the two pipelines, the calibration and distribution-stability diagnostics, the
+internal explanation and reason-code prototype, and the offline approval-threshold
+policy simulation).
 
 Roadmap:
 
@@ -33,7 +34,8 @@ Roadmap:
 | 10 | Discrimination validation with paired resampling confidence intervals | Done |
 | 11 | Probability calibration diagnostics and input-distribution stability | Done |
 | 12 | Model explanation and reason-code prototype | Done |
-| 13 | Approval threshold and business-policy offline simulation | Planned |
+| 13 | Approval threshold and business-policy offline simulation | Done |
+| 14 | Monitoring dashboard, alert rules and run records | Planned |
 
 ## Dataset
 
@@ -73,6 +75,7 @@ credit-risk-modeling/
   src/evaluation/discrimination.py # Step 10: ranking metrics + paired bootstrap
   src/evaluation/calibration_stability.py  # Step 11: calibration + drift checks
   src/explain/local.py             # Step 12: local attribution + reason codes
+  src/strategy/approval.py         # Step 13: threshold policy + scenario utility
   sql/01_create_tables.sql         # Step 2: raw table DDL
   sql/02_aggregate_bureau.sql      # Step 2: bureau -> one row per customer
   sql/03_build_model_table.sql     # Step 2: LEFT JOIN into the modelling table
@@ -93,12 +96,15 @@ credit-risk-modeling/
   tests/test_diagnostics_runner.py     # Step 11 runner end to end
   tests/test_local_explanation.py      # identity, grouping and code boundaries
   tests/test_explanation_runner.py     # Step 12 runner end to end
+  tests/test_approval.py               # rules, utility maths and selection
+  tests/test_policy_runner.py          # Step 13 runner end to end
   tests/conftest.py                # synthetic modelling table shared by runners
   scripts/run_step_08_comparison.py  # one shared split: logistic vs boosting
   scripts/run_step_09_scorecard.py   # score scale, decomposition and audit
   scripts/run_step_10_discrimination.py  # paired bootstrap on the same split
   scripts/run_step_11_diagnostics.py     # calibration + stability reports
   scripts/run_step_12_explanations.py    # aggregate explanation audit only
+  scripts/run_step_13_policy_simulation.py  # threshold curves and cost sensitivity
   data/data_dictionary.md          # field-level business meaning (Step 1 output)
   docker-compose.yml               # local PostgreSQL
   .github/workflows/ci.yml         # CI: pytest + PostgreSQL SQL validation
@@ -770,6 +776,69 @@ The two models lean on the same information here, but the numbers are not
 comparable magnitudes: the references differ, and the label is the dataset's own
 definition rather than a verified regulatory default.
 
+## Step 13: offline approval-threshold policy simulation
+
+```bash
+python scripts/run_step_13_policy_simulation.py \
+  --model-table data/processed/model_table.csv \
+  --out-dir reports/step_13
+```
+
+Both models are simulated on the same validation applications under a fixed
+threshold grid. The unit is an assumed **utility point**, not currency, and no
+real credit decision is made.
+
+```
+approve = 1(p <= t)
+
+U = N0 * G - N1 * L - NA * C
+    non-events      events   approvals
+```
+
+with `G = 100`, `L = 1000` and `C = 5` in the demo configuration. The curve
+always contains the **reject-all** and **approve-all** baselines.
+
+**Discipline encoded in the module**
+
+- Ties are decided together: the rule is `p <= threshold`, and the cumulative
+  counts come from one sort plus right-side insertion points, so identical
+  predictions can never be split to hit a target approval rate. The realised
+  approval rate therefore need not equal a round number.
+- Reject-all keeps `approved_event_rate` **missing**, not zero. Refusing every
+  application is not a zero-risk business.
+- A rule reads probabilities only. Labels are used for offline evaluation and
+  for choosing a development candidate, and the reason codes from Step 12 are
+  never turned into approval conditions.
+- When no candidate satisfies the sample constraints, the module raises
+  `NoFeasiblePolicyError` and the runner records "无可行策略". It never relaxes a
+  constraint silently and never falls back to approve-all.
+- Cost sensitivity changes `L` while the selected threshold stays frozen. If a
+  pass rate moves with the cost assumption, the threshold was re-searched.
+
+**Demo run on the synthetic table** (1200 validation rows, bad rate 35.5%,
+threshold grid 0.00–0.30 step 0.01, utility 100/1000/5):
+
+| Model | Threshold | Approved | Approval rate | Approved event rate | Labelled utility | Predicted utility |
+|---|---|---|---|---|---|---|
+| Logistic | 0.08 | 438 | 36.50% | 1.37% | 35,010 | 28,142 |
+| Boosting | 0.06 | 449 | 37.42% | 2.45% | 30,555 | 34,352 |
+
+Two things are worth reading carefully rather than celebrating:
+
+- The boosting model ranks slightly better yet earns **lower labelled utility**
+  here. A ranking edge need not appear at the threshold the assumed costs make
+  interesting, so model metrics and policy metrics are separate questions.
+- The boosting model's *predicted* utility is higher than its labelled utility,
+  while the logistic model's is lower. That is the Step 11 calibration finding
+  showing up again: if probabilities are not calibrated, the `p`-based utility is
+  not a substitute for the labelled one, and neither may be reported alone.
+
+Fixing each selected threshold and re-evaluating at `L = 500 / 1000 / 2000` keeps
+the pass rate and the approved event rate identical and moves the labelled
+utility by exactly `approved_events × ΔL`: logistic 38,010 → 29,010, boosting
+36,055 → 19,555. The larger the approved event count, the more sensitive the
+policy is to the loss assumption.
+
 ## Current limitations (kept explicit)
 
 - The Home Credit split in this repository is a stratified random holdout, **not**
@@ -840,6 +909,20 @@ definition rather than a verified regulatory default.
   them, and no approval threshold has been chosen.
 - Age-related features remain in the internal explanation only; their use in
   real credit decisions would need a separate fairness and compliance review.
+- The Step 13 utility is an assumption set, not profit: there is no observation
+  window, no recovery, no interest income, no funding or operating cost, and the
+  public label is not a verified loss. No "annual bad-debt reduction" can be read
+  off these numbers.
+- The simulation only knows the applications in the sample. The counterfactual
+  outcome of applications an alternative policy would have rejected is unknown,
+  and no credit decision has been executed.
+- Thresholds are chosen on a validation set that was already inspected, so the
+  selected rule's development performance carries policy-selection bias; Step 10
+  intervals describe a fixed model and do not become the selected rule's
+  interval.
+- The sample constraints (approval rate, approved event rate, minimum count,
+  positive utility) are development settings, not bank policy, and they are not a
+  guarantee about a future approved population.
 
 ## Reproducibility
 
