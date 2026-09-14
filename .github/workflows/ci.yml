@@ -143,3 +143,26 @@ jobs:
             reports/coverage-postgres.xml
             reports/test-results-postgres.xml
           if-no-files-found: warn
+
+      - name: 实库测试不得被跳过
+        run: |
+          # 连接配置缺失或失联时必须失败，不能“跳过后全绿”
+          uv run --frozen python - <<'PY'
+          import sys
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          report = Path("reports/test-results-postgres.xml")
+          if not report.is_file():
+              sys.exit("没有生成实库测试报告，无法确认测试是否真的执行")
+
+          skipped = [
+              case.get("name")
+              for case in ET.parse(report).iter("testcase")
+              if case.find("skipped") is not None
+          ]
+          if skipped:
+              sys.exit(f"实库作业出现跳过，连接配置可能有误：{skipped}")
+
+          print("实库测试全部实际执行，无跳过")
+          PY

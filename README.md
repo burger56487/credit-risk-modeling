@@ -47,7 +47,7 @@ Roadmap:
 | Batch monitoring and local dashboard | Research prototype; it never takes a business action and the dashboard page was not visually verified |
 | Artefact and scoring API | Verified loading and online/offline consistency; not a production security certification |
 | Continuous integration | Added in Step 16; whether it passes is decided by the actual workflow run |
-| Raw database full chain | **Accepted by target-database integration tests** on a fixed artificial sample: staged atomic load, rollback matrix, concurrency and read snapshot. Loading the real Kaggle files has not been run yet. |
+| Raw database full chain | The two-file projected pipeline **has passed target-database integration acceptance on an artificial sample** — load, aggregation, rollback, writer mutual exclusion and reading the previous version before commit. Real-data-scale acceptance and legacy-database migration acceptance are still outstanding. |
 | Final holdout evaluation | **Not performed** |
 | Real business use and benefit | **Not started** and must not be claimed |
 
@@ -250,6 +250,11 @@ elsewhere only for fast semantic tests and are not evidence of transactional
 correctness.
 
 ### Target-database acceptance (Step 2c)
+
+**Documented status (do not overstate it):**
+
+> 两文件选列数据库管道已通过人工样本的目标数据库集成验收，覆盖装载、聚合、回滚、
+> 写入互斥与提交前读取旧版本；真实数据规模验收及旧库迁移验收待完成。
 
 ```bash
 # a throwaway database whose name contains "test"; the tests rebuild the tables
@@ -1209,8 +1214,8 @@ found it.
 | `uv sync --frozen --all-extras` | installed, including the dashboard extra |
 | `compileall -q src apps` | exit 0 |
 | `ruff check src apps tests` | all checks passed |
-| `pytest` (no coverage) | 281 passed |
-| `pytest --cov --cov-branch` | 281 passed, branch coverage **86.96%**, gate 80% reached |
+| `pytest` (no coverage) | 294 passed, 17 skipped (the database tests) |
+| `pytest --cov --cov-branch` | 294 passed, overall coverage with branch checking enabled **80.11%**, gate reached |
 | Acceptance test | offline probability, score and decision all reproduce through the API |
 
 The automated workflow adds linting and the coverage gate but deliberately does
@@ -1220,8 +1225,13 @@ now runs **two jobs whose numbers are reported separately**:
 
 | Job | What it runs | Latest observed |
 |---|---|---|
-| acceptance (no database) | syntax, ruff, full suite, coverage gate | 294 passed, 17 skipped, coverage 80.11% |
-| postgres-pipeline (PostgreSQL 16 service) | the real loader and SQL scripts, including rollback, concurrency and snapshot tests, plus the whole suite | 311 passed, coverage 86.86% |
+| acceptance (no database) | syntax, ruff, full suite, coverage gate | 294 passed, 17 skipped (all of them `tests/test_postgres_pipeline.py`), overall coverage with branch checking **80.11%** |
+| postgres-pipeline (PostgreSQL 16 service) | the real loader and SQL scripts, including rollback, concurrency and snapshot tests, plus the whole suite | 311 passed, 0 skipped, overall coverage with branch checking **86.86%** |
+
+The two jobs overlap: 294 + 311 is **not** 605 distinct tests, it is the same suite
+run once without and once with a database. The reported figure is the combined
+line+branch coverage (`--cov-branch` enabled), not a pure branch-coverage
+percentage.
 
 The postgres job also fails if the loader starts without a configured connection
 string, and the `postgres`-marked tests are skipped — not silently passed — when no
