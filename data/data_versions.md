@@ -7,7 +7,7 @@ download tokens.
 ## Status (do not overstate it)
 
 > 两文件选列数据库管道已通过人工样本的目标数据库集成验收，并完成真实规模首装、
-> 数量与关联对账及同输入重复刷新。**来源追溯（官方来源证据）与部分内容核验口径
+> 数量与关联对账、同输入重复刷新，以及逐主键逐字段与表指纹核验。**官方来源证据
 > 待补齐**；旧库迁移与真实模型独立评价尚未验收。
 
 ## Input files (projection contract "数据契约第一版")
@@ -24,7 +24,9 @@ modified. They are git-ignored and are not part of this repository.
 
 All four downloads came from **third-party Kaggle dataset pages**, not from the
 official competition page. Evidence: the browser download records for the four
-archives downloaded on 2026-09-14 between 17:06 and 17:08 local time.
+archives downloaded on 2026-09-14 between 17:06 and 17:08 local time. They are
+**four third-party upload copies**: different uploaders may have copied the same
+upstream file, so they cannot be treated as independent sources.
 
 | Downloaded file | Page it was downloaded from | Bytes |
 |---|---|---|
@@ -36,8 +38,8 @@ archives downloaded on 2026-09-14 between 17:06 and 17:08 local time.
 What this supports:
 
 - `application_train.csv` is byte-identical (full SHA-256) across all four
-  independent uploads, including a single-file upload.
-- `bureau.csv` is byte-identical (full SHA-256) across three independent uploads.
+  third-party upload copies, including a single-file upload.
+- `bureau.csv` is byte-identical (full SHA-256) across three of those copies.
 - Both files' sizes match the entries recorded inside the archives used.
 
 What this does **not** support:
@@ -45,11 +47,34 @@ What this does **not** support:
 - that either file is byte-identical to the official competition files;
 - that the uploads were themselves faithful to the competition data.
 
-An earlier statement in this project's working notes described `archive.zip` as
-an official single-file download. That was wrong and is corrected here. To close
-the provenance gap, download `application_train.csv` and `bureau.csv` from the
-official competition page (after accepting its rules) and record their digests in
-the table above.
+Correction history: an earlier statement in this project's working notes described
+`archive.zip` as an official single-file download and used it as an official
+cross-check. **That claim is withdrawn (作废).** No official comparison exists in
+this record yet.
+
+### How to close the provenance gap (local operator action)
+
+The official competition files require signing in to Kaggle and accepting the
+competition rules; neither can be done by this agent (no account, no credentials,
+no browser control), and the risk decision belongs to the project owner. Two
+options, both performed by the operator:
+
+1. Accept the rules in the browser, create an API token, save it as
+   `%USERPROFILE%\.kaggle\kaggle.json`; the agent can then download with
+   `python -m kaggle competitions download -c home-credit-default-risk -f <file>`.
+2. Download the two files from the official page and provide their paths.
+
+Then the comparison is **the SHA-256 of the extracted files** (never the archive
+digest) against the values in the input table above:
+
+| Outcome | Handling |
+|---|---|
+| Both files identical | Record the provenance link, keep the existing loads and verification evidence, freeze this same membership list. **No fourth load is required.** |
+| Either file differs | Pause the freeze; first check whether the difference is line endings, encoding or row order, or a change in field values or the record set. |
+| Official files still unavailable | Provenance stays blocked; do not start official real-data modelling. |
+
+Byte identity establishes the content relationship only; it does not by itself
+authorise every later use, and the official terms still apply.
 
 ## Loads and code
 
@@ -63,21 +88,43 @@ the table above.
 
 ## Content version of the four tables
 
-Algorithm: md5 over a header line (column names joined by `|`) followed by one
-canonical line per row, rows ordered by primary key; fields joined by `0x1f`,
-NULL rendered as `\N`, numbers rendered by their exact text form.
+Two different fingerprints were produced at different times. They are kept as
+separate evidence, and neither is retroactively claimed for the earlier runs.
 
-| Table | Rows | md5 |
+**(a) Aggregate checksum** used in the first working notes:
+`sum(hashtextextended(row::text, 0))` per table. It is an order-independent
+aggregate checksum, not a cryptographic digest, and it must not be quoted as proof
+that two tables are identical.
+
+**(b) Interim md5** (kept only as the evidence that the third load reproduced the
+previous content): md5 over a header line plus one canonical line per row, ordered
+by primary key, fields joined by `0x1f`, NULL as `\N`. Values: `application_train`
+`10216b4c6cc0c216ff063d370f6c8308`, `bureau`
+`4942a94e8ed446454bfad29007113cc5`, `feat_bureau`
+`2f6999ced51c62b88a9df19dec502815`, `model_input`
+`869a5d0834c694a1ec826a7400123262`. The same values were observed before and
+after the third load of the same input.
+
+**(c) Table fingerprint v1 (current registration fingerprint)** — SHA-256, the
+same algorithm family as the source files, with an explicit and versioned
+serialisation that cannot run two different contents into the same byte sequence:
+
+- encoding UTF-8; rows in ascending primary-key order; fields in contract order;
+- header: the literal `creditrisk-table-fingerprint v1`, the table name, then each
+  column name length-prefixed with 4 big-endian bytes;
+- each field: 1 tag byte (`N` for NULL, `V` for a value), then an 8-byte big-endian
+  length, then the payload bytes;
+- each row ends with `0x1e`.
+
+This fingerprint describes **the current table version**; it was not computed on
+the three earlier loads, and the earlier evidence is not replaced by it.
+
+| Table | Rows | SHA-256 (fingerprint v1) |
 |---|---|---|
-| `application_train` | 307,511 | `10216b4c6cc0c216ff063d370f6c8308` |
-| `bureau` | 1,716,428 | `4942a94e8ed446454bfad29007113cc5` |
-| `feat_bureau` | 305,811 | `2f6999ced51c62b88a9df19dec502815` |
-| `model_input` | 307,511 | `869a5d0834c694a1ec826a7400123262` |
-
-These digests were identical before and after the third load of the same input,
-so the repeated refresh produced byte-identical table content. (An earlier
-working note quoted `sum(hashtextextended(row::text, 0))`. That is an *aggregate
-checksum*, not a cryptographic digest, and it is superseded by the values above.)
+| `application_train` | 307,511 | `4359bb186601a630dd4e16afb37abb9906a0ff9f096a45b47a95274170765be8` |
+| `bureau` | 1,716,428 | `b8e47e86898404c7a22fec19f47bc75232f9823294ccb83ce5d07ce4fffc26a5` |
+| `feat_bureau` | 305,811 | `d2f111307ce61a63fea2aefdc931a544ea8c5475a78a7a3a272e9722c0a23121` |
+| `model_input` | 307,511 | `49480b96f6e55de5f2b41f245b62ed0153d781b5525e4f316e8df4ab013c8bd4` |
 
 ## Verification results
 
@@ -102,9 +149,22 @@ application**, per amount field, one field at a time:
 | `bureau_credit_sum_avg` (same known set) | 1 | 2 | 263,488 |
 | `bureau_debt_total` (from `bureau.amt_credit_sum_debt`) | 7,360 | 102,086 | 154,045 |
 
-A separate, different state exists: 44,020 applications have **no bureau record at
-all**, so every bureau-derived value is NULL by design. Do not merge that with
+A separate, different state exists: for the 44,020 applications with **no bureau
+record at all**, the count fields are zero while the amount fields and the
+corresponding statistics are empty (`NULL`) by design. Do not merge that with
 "record exists but the amount is unknown".
+
+## Dependencies
+
+After the lock file was regenerated against the official PyPI index (the earlier
+lock referenced a mirror that GitHub runners receive 403 from), the package **name
+and version set is unchanged** (73 packages). That supports "the dependency
+version set did not change"; it does not by itself prove the built artefacts are
+identical. Current `uv.lock` SHA-256:
+`47b3b056b14122feb9e73229599c8db8708484bd97557570a2190b966106c2f6`.
+Continuous integration for this revision: acceptance job (no database) 294 passed,
+17 skipped, coverage with branch checking 80.11%; PostgreSQL job 311 passed, no
+skips, coverage with branch checking 86.86%.
 
 ## Observed performance (only what was measured)
 
@@ -135,7 +195,15 @@ measurement.
 | Disjoint and complete | verified (pairwise disjoint, union equals all applications) |
 | `membership.csv` SHA-256 | `1dbe7fb19ea7f8ad76ea19b63df0f61e093e77aed97b9422e683dee5a0bdeda8` |
 | Location | `artifacts/partitions/real_v1/` (local only; contains application ids, not published) |
-| Freeze status | **Not frozen** — waiting for official provenance or an explicit decision to accept third-party provenance |
+| Freeze status | **Not frozen** — waiting for official provenance evidence |
+
+When the provenance check passes, this same list is frozen: **no re-sampling, no
+new seed, no rewriting of the membership file**. The metadata file then records the
+freeze time, the associated data version, the provenance evidence and the code
+version, and the status line changes from "待补/未冻结" to "已冻结". Reporting the
+sample sizes and label ratios needed for a stratified split is not the same as
+having evaluated a model on the final test split; later work must not adjust the
+split, the variables or the thresholds based on test-set metrics.
 
 ## Artefact separation
 
