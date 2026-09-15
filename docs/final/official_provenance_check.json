@@ -1,0 +1,20 @@
+{
+  "来源页面": "https://www.kaggle.com/competitions/home-credit-default-risk/data",
+  "压缩包": "home-credit-default-risk.zip",
+  "压缩包字节数": 721616255,
+  "下载时间": "2026-09-15 12:29 (本地)",
+  "对照结果": {
+    "application_train.csv": {
+      "官方摘要": "52e96b895b1112e1c853f670e58372719c8441c5ed1c57ac2f7fad559d784f5f",
+      "记录摘要": "52e96b895b1112e1c853f670e58372719c8441c5ed1c57ac2f7fad559d784f5f",
+      "一致": true,
+      "字节数": 166133370
+    },
+    "bureau.csv": {
+      "官方摘要": "9d799143423f280720cf51c1bfbbab2a0422da8ff2763335bb30bf43155494f7",
+      "记录摘要": "9d799143423f280720cf51c1bfbbab2a0422da8ff2763335bb30bf43155494f7",
+      "一致": true,
+      "字节数": 170016717
+    }
+  }
+}

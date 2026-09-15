@@ -8,7 +8,7 @@ download tokens.
 
 > 两文件选列数据库管道已通过人工样本的目标数据库集成验收，并完成真实规模首装、
 > 数量与关联对账、同输入重复刷新，以及逐主键逐字段与表指纹核验。**官方来源证据
-> 待补齐**；旧库迁移与真实模型独立评价尚未验收。
+> 已补齐（与官方竞赛文件字节一致）**；旧库迁移与生产部署仍未覆盖。
 
 ## Input files (projection contract "数据契约第一版")
 
@@ -20,7 +20,29 @@ download tokens.
 The two files live in `data/raw/` with their original names and were never
 modified. They are git-ignored and are not part of this repository.
 
-## Provenance (incomplete on purpose)
+## Provenance
+
+**Closed.** The operator downloaded the official competition archive
+`home-credit-default-risk.zip` (721,616,255 bytes, 2026-09-15 12:29 local) from
+`https://www.kaggle.com/competitions/home-credit-default-risk/data`, and the two
+files it contains were compared by full SHA-256 against the digests of the input
+files this project actually loaded:
+
+| File | Official archive SHA-256 | Loaded input SHA-256 | Result |
+|---|---|---|---|
+| `application_train.csv` | `52e96b895b1112e1c853f670e58372719c8441c5ed1c57ac2f7fad559d784f5f` | same | **byte-identical** |
+| `bureau.csv` | `9d799143423f280720cf51c1bfbbab2a0422da8ff2763335bb30bf43155494f7` | same | **byte-identical** |
+
+Machine-readable evidence: `docs/final/official_provenance_check.json`. The
+digests were computed by streaming the entries inside the official archive, so no
+extraction step could alter them.
+
+Consequence, per the agreed rule: the existing loads, the per-key content
+verification and the frozen split all remain valid; **no fourth load and no
+re-split were performed**. Byte identity establishes the content relationship only
+— the official terms still govern use.
+
+### Earlier provenance record (kept as history)
 
 All four downloads came from **third-party Kaggle dataset pages**, not from the
 official competition page. Evidence: the browser download records for the four
@@ -52,29 +74,20 @@ Correction history: an earlier statement in this project's working notes describ
 cross-check. **That claim is withdrawn (作废).** No official comparison exists in
 this record yet.
 
-### How to close the provenance gap (local operator action)
+### How the gap was closed (kept as history)
 
 The official competition files require signing in to Kaggle and accepting the
-competition rules; neither can be done by this agent (no account, no credentials,
-no browser control), and the risk decision belongs to the project owner. Two
-options, both performed by the operator:
+competition rules, which neither this agent (no account, no credentials, no
+browser control in this environment) nor the reviewing user could do on the
+other's behalf. The operator downloaded the official archive from the Data tab
+and provided it; the comparison rule used was **the SHA-256 of the files inside
+that archive** (never the archive digest) against the recorded input digests.
 
-1. Accept the rules in the browser, create an API token, save it as
-   `%USERPROFILE%\.kaggle\kaggle.json`; the agent can then download with
-   `python -m kaggle competitions download -c home-credit-default-risk -f <file>`.
-2. Download the two files from the official page and provide their paths.
-
-Then the comparison is **the SHA-256 of the extracted files** (never the archive
-digest) against the values in the input table above:
-
-| Outcome | Handling |
-|---|---|
-| Both files identical | Record the provenance link, keep the existing loads and verification evidence, freeze this same membership list. **No fourth load is required.** |
-| Either file differs | Pause the freeze; first check whether the difference is line endings, encoding or row order, or a change in field values or the record set. |
-| Official files still unavailable | Provenance stays blocked; do not start official real-data modelling. |
-
-Byte identity establishes the content relationship only; it does not by itself
-authorise every later use, and the official terms still apply.
+| Outcome | Handling | Used here |
+|---|---|---|
+| Both files identical | Record the provenance link, keep the existing loads and verification evidence, freeze the same membership list; no fourth load | **this case** |
+| Either file differs | Pause the freeze; check line endings, encoding or row order before field values or the record set | not applicable |
+| Official files unavailable | Provenance stays blocked; no official real-data modelling | not applicable |
 
 ## Loads and code
 
@@ -195,9 +208,9 @@ measurement.
 | Disjoint and complete | verified (pairwise disjoint, union equals all applications) |
 | `membership.csv` SHA-256 | `1dbe7fb19ea7f8ad76ea19b63df0f61e093e77aed97b9422e683dee5a0bdeda8` |
 | Location | `artifacts/partitions/real_v1/` (local only; contains application ids, not published) |
-| Freeze status | **Not frozen** — waiting for official provenance evidence |
+| Freeze status | **Frozen (2026-09-15)**, provenance closed: the input files are byte-identical to the official competition archive |
 
-### Engineering freeze executed (provenance still open)
+### Engineering freeze executed (provenance closed)
 
 The membership list above was **used as the frozen split** for the real experiment
 and the final evaluation, and is bound by digest inside
@@ -205,9 +218,9 @@ and the final evaluation, and is bound by digest inside
 validation 61,502 / test 61,503, unit = application id, no re-sampling, no new
 seed, file unchanged.
 
-This is an engineering freeze of the split and the scheme. It is **not** a
-provenance clearance: the source item below stays open, and the results in
-`docs/final_report.md` are labelled accordingly.
+Both the split and the scheme are frozen, and the provenance item is closed (see
+the provenance section above). The results in `docs/final_report.md` are labelled
+accordingly.
 
 | Item | Value |
 |---|---|
@@ -217,13 +230,13 @@ provenance clearance: the source item below stays open, and the results in
 | Test set openings | 1 (recorded in `artifacts/final/test_set_openings.json`) |
 | Final evaluation | `docs/final_report.md`; aggregate tables in `docs/final/`; per-applicant predictions stay local |
 
-When the provenance check passes, this same list is frozen: **no re-sampling, no
-new seed, no rewriting of the membership file**. The metadata file then records the
+The provenance check passed and this same list was frozen: **no re-sampling, no
+new seed, no rewriting of the membership file**. The metadata file records the
 freeze time, the associated data version, the provenance evidence and the code
-version, and the status line changes from "待补/未冻结" to "已冻结". Reporting the
-sample sizes and label ratios needed for a stratified split is not the same as
-having evaluated a model on the final test split; later work must not adjust the
-split, the variables or the thresholds based on test-set metrics.
+version. Reporting the sample sizes and label ratios needed for a stratified split
+is not the same as having evaluated a model on the final test split; later work
+must not adjust the split, the variables or the thresholds based on test-set
+metrics.
 
 ## Artefact separation
 
