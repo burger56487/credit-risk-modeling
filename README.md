@@ -47,7 +47,7 @@ Roadmap:
 | Batch monitoring and local dashboard | Research prototype; it never takes a business action and the dashboard page was not visually verified |
 | Artefact and scoring API | Verified loading and online/offline consistency; not a production security certification |
 | Continuous integration | Added in Step 16; whether it passes is decided by the actual workflow run |
-| Raw database full chain | The two-file projected pipeline **has passed target-database integration acceptance on an artificial sample** — load, aggregation, rollback, writer mutual exclusion and reading the previous version before commit. Real-data-scale acceptance and legacy-database migration acceptance are still outstanding. |
+| Raw database full chain | The two-file projected pipeline **has passed target-database integration acceptance on an artificial sample**, and a **real-scale first load plus a same-input repeated refresh** completed with count, linkage and per-key content verification (see [data_versions.md](data/data_versions.md)). Provenance is still third-party only, the membership list is not frozen, and legacy-database migration plus an independent real-model evaluation remain outstanding. |
 | Final holdout evaluation | **Not performed** |
 | Real business use and benefit | **Not started** and must not be claimed |
 
