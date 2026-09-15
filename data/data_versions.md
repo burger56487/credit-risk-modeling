@@ -197,6 +197,26 @@ measurement.
 | Location | `artifacts/partitions/real_v1/` (local only; contains application ids, not published) |
 | Freeze status | **Not frozen** — waiting for official provenance evidence |
 
+### Engineering freeze executed (provenance still open)
+
+The membership list above was **used as the frozen split** for the real experiment
+and the final evaluation, and is bound by digest inside
+`artifacts/experiments/real_v1/freeze_manifest.json`: training 184,506 /
+validation 61,502 / test 61,503, unit = application id, no re-sampling, no new
+seed, file unchanged.
+
+This is an engineering freeze of the split and the scheme. It is **not** a
+provenance clearance: the source item below stays open, and the results in
+`docs/final_report.md` are labelled accordingly.
+
+| Item | Value |
+|---|---|
+| Validation inner split | calibration 30,751 / selection 30,751, stratified, seed 42, digest `b264424c88bd96ce12327a32f1c63f1f8510c499615df0a95cf2e6d1f2823f37` |
+| Chosen scheme | main model (gradient boosting) with **raw** probabilities; calibration made no material difference (log-loss gap ≈ 1e-6) |
+| Frozen threshold | `0.1753`, rule: flagged when predicted probability is greater than or equal to the threshold; demo capacity 10% |
+| Test set openings | 1 (recorded in `artifacts/final/test_set_openings.json`) |
+| Final evaluation | `docs/final_report.md`; aggregate tables in `docs/final/`; per-applicant predictions stay local |
+
 When the provenance check passes, this same list is frozen: **no re-sampling, no
 new seed, no rewriting of the membership file**. The metadata file then records the
 freeze time, the associated data version, the provenance evidence and the code
